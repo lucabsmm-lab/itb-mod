@@ -5,9 +5,78 @@
 #include <Geode/modify/GJBaseGameLayer.hpp>
 #include <Geode/modify/PlayLayer.hpp>
 
+#include <cmath>
+
 namespace {
     bool g_bypass = false;      // our own re-injected inputs skip the buffer
     constexpr size_t kMaxQueue = 16;
+
+    // Debug mode: compares the real run, tick by tick, with what the look-ahead predicted.
+    // Offset 0 assumes the input was decided inside the tick's command processing, offset 1
+    // assumes it came one tick earlier; whichever matches tells us how GD orders things.
+    struct DriftTrack {
+        bool active = false;
+        int startTick = 0;
+        int channel = 0;
+        int shift = 0;
+        int length = 0;
+        std::vector<PlayerObject*> players;
+        std::vector<CCPoint> predicted[2];
+        float maxErr[2] = { 0.f, 0.f };
+        int firstBad[2] = { -1, -1 };
+        int compared = 0;
+    };
+    DriftTrack g_drift;
+
+    void finishDrift(char const* why) {
+        if (!g_drift.active) return;
+        g_drift.active = false;
+        log::info(
+            "[IB] drift check ended ({}): {} ticks compared | offset0 max err {:.2f} (first >2u at tick {}) | offset1 max err {:.2f} (first >2u at tick {})",
+            why, g_drift.compared, g_drift.maxErr[0], g_drift.firstBad[0], g_drift.maxErr[1], g_drift.firstBad[1]
+        );
+    }
+
+    void startDrift(sim::Decision const& decision, std::vector<PlayerObject*> const& players, int channel) {
+        finishDrift("next input");
+        g_drift = DriftTrack {};
+        g_drift.active = true;
+        g_drift.startTick = ibRuntime().tick;
+        g_drift.channel = channel;
+        g_drift.shift = decision.shift;
+        g_drift.length = decision.shift + ibConfig().assumedHold;
+        g_drift.players = players;
+        for (int i = 0; i < 2; ++i) g_drift.predicted[i] = decision.predicted[i];
+    }
+
+    void stepDrift() {
+        if (!g_drift.active) return;
+        int k = ibRuntime().tick - g_drift.startTick;
+        for (int offset = 0; offset < 2; ++offset) {
+            int index = k - offset;
+            if (index < 0) continue;
+            for (size_t p = 0; p < g_drift.players.size() && p < 2; ++p) {
+                auto const& path = g_drift.predicted[p];
+                if (index >= static_cast<int>(path.size())) continue;
+                auto real = g_drift.players[p]->getPosition();
+                float err = std::hypot(real.x - path[index].x, real.y - path[index].y);
+                g_drift.maxErr[offset] = std::max(g_drift.maxErr[offset], err);
+                if (err > 2.f && g_drift.firstBad[offset] < 0) g_drift.firstBad[offset] = index;
+            }
+        }
+        g_drift.compared = k + 1;
+        if (k >= g_drift.length) finishDrift("covered delay + assumed hold");
+    }
+
+    void logDecision(sim::Decision const& d, bool down, bool isPlayer1, size_t playerCount) {
+        log::info(
+            "[IB] {} P{}{}: as pressed {} -> hold back {} ticks | {} sim ticks in {:.2f} ms (dt {:.4f}){}{}",
+            down ? "press" : "release", isPlayer1 ? 1 : 2, playerCount == 2 ? " (dual, both players)" : "",
+            d.onTimeViable ? "survives" : "DOOMED", d.shift, d.steps, d.ms, ibRuntime().lastDt,
+            d.timedOut ? " | TIME LIMIT HIT" : "",
+            d.realChanged ? " | WARNING: real player was disturbed by the look-ahead (restored)" : ""
+        );
+    }
 
     void fire(GJBaseGameLayer* layer, Channel& ch, bool down, bool isPlayer1) {
         g_bypass = true;
@@ -101,10 +170,23 @@ class $modify(IBGameLayer, GJBaseGameLayer) {
             return;
         }
 
+        if (g_drift.active && g_drift.channel == (isPlayer1 ? 0 : 1)) finishDrift("next input");
+
         int shift = 0;
         if (down != ch.held) {
             auto players = movedPlayers(pl, isPlayer1);
-            if (!players.empty()) shift = sim::decideShift(this, players, ch.held, down);
+            if (!players.empty()) {
+                auto decision = sim::decide(this, players, ch.held, down);
+                shift = decision.shift;
+                if (ibConfig().debug) {
+                    logDecision(decision, down, isPlayer1, players.size());
+                    sim::drawDebug(decision);
+                    startDrift(decision, players, isPlayer1 ? 0 : 1);
+                }
+                else if (decision.realChanged) {
+                    log::warn("[IB] look-ahead disturbed the real player (restored)");
+                }
+            }
         }
 
         if (shift <= 0) {
@@ -136,6 +218,7 @@ class $modify(IBGameLayer, GJBaseGameLayer) {
             }
         }
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
+        if (pl && static_cast<GJBaseGameLayer*>(pl) == this) stepDrift();
     }
 };
 
@@ -159,12 +242,15 @@ class $modify(IBPlayLayer, PlayLayer) {
     }
 
     void resetLevel() {
+        finishDrift("level reset");
+        sim::clearDebug();
         settleChannels(this);
         PlayLayer::resetLevel();
         ibRuntime().usedThisAttempt = ibConfig().enabled;
     }
 
     void onQuit() {
+        g_drift = DriftTrack {};
         ibRuntime().clearQueues();
         sim::teardown();
         PlayLayer::onQuit();
@@ -173,6 +259,11 @@ class $modify(IBPlayLayer, PlayLayer) {
     void destroyPlayer(PlayerObject* player, GameObject* object) {
         if (sim::onDestroyPlayer(player)) return;
         if (sim::active) return;
+        if (ibConfig().debug && g_drift.active) {
+            log::info("[IB] real player died {} ticks after the last decision (held back {} ticks)",
+                ibRuntime().tick - g_drift.startTick, g_drift.shift);
+            finishDrift("death");
+        }
         SafeModeGuard guard(this);
         PlayLayer::destroyPlayer(player, object);
     }

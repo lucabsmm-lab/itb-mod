@@ -5,10 +5,14 @@
 #include <Geode/modify/GameObject.hpp>
 #include <Geode/modify/HardStreak.hpp>
 
+#include <chrono>
 #include <unordered_map>
 
 namespace {
+    using Clock = std::chrono::steady_clock;
+
     Ref<PlayerObject> g_fakes[2];
+    Ref<CCDrawNode> g_debugDraw;
 
     bool g_dead = false;   // a hidden player died this branch
     bool g_stop = false;   // the branch hit something we don't simulate (portal, end, ...)
@@ -47,7 +51,7 @@ namespace {
     constexpr int kReleaseBranches[] = { -1, 0, 6, 12, 24, 48 };
     constexpr int kBranchCount = 6;
     constexpr int kGroundSettleMax = 240;  // stop looking for a landing after 1s
-    constexpr int kSafestSpan = 6;         // Safest mode scores this many ticks past the first safe one
+    constexpr int kSafestSpan = 4;         // Safest mode scores this many ticks past the first safe one
 
     bool isFlyMode(PlayerObject* p) {
         return p->m_isShip || p->m_isBird || p->m_isDart || p->m_isSwing;
@@ -58,8 +62,42 @@ namespace {
         else p->releaseButton(PlayerButton::Jump);
     }
 
+    // The bits of a real player we check after simulating, to catch any leak into the real game.
+    struct RealSnapshot {
+        PlayerObject* player;
+        CCPoint pos;
+        double yVel;
+        bool onGround;
+        bool upsideDown;
+        bool dead;
+
+        explicit RealSnapshot(PlayerObject* p)
+          : player(p), pos(p->getPosition()), yVel(p->m_yVelocity),
+            onGround(p->m_isOnGround), upsideDown(p->m_isUpsideDown), dead(p->m_isDead) {}
+
+        // Puts the player back if anything moved. Returns true if it had to.
+        bool restoreIfChanged() const {
+            auto now = player->getPosition();
+            bool changed = now.x != pos.x || now.y != pos.y || player->m_yVelocity != yVel
+                || player->m_isOnGround != onGround || player->m_isUpsideDown != upsideDown
+                || player->m_isDead != dead;
+            if (changed) {
+                player->setPosition(pos);
+                player->m_yVelocity = yVel;
+                player->m_isOnGround = onGround;
+                player->m_isDead = dead;
+            }
+            return changed;
+        }
+    };
+
     void prepare(PlayerObject* fake, PlayerObject* real, bool held) {
+        // spawnFromPlayer copies attributes; keep the hidden player's own object ID so its
+        // orb/pad activations never get mixed up with (or erased as) the real player's.
+        int ownID = fake->m_uniqueID;
         fake->spawnFromPlayer(real, false);
+        fake->m_uniqueID = ownID;
+
         fake->toggleVisibility(false);
         fake->setVisible(false);
         fake->m_playEffects = false;
@@ -67,6 +105,7 @@ namespace {
         fake->m_isOnGround = real->m_isOnGround;
         fake->m_isOnGround2 = real->m_isOnGround2;
         fake->m_isSecondPlayer = real->m_isSecondPlayer;
+        fake->m_isDead = false;
         fake->m_touchingRings->removeAllObjects();
         fake->m_touchedRings = real->m_touchedRings;
         fake->resetCollisionLog(true);
@@ -85,66 +124,19 @@ namespace {
         }
         g_touched.clear();
 
-        auto& activated = layer->m_gameState.m_activatedObjectIDs;
         int fakeID = fake->m_uniqueID;
-        for (auto it = activated.begin(); it != activated.end();) {
-            if (it->first.second == fakeID) it = activated.erase(it);
-            else ++it;
+        bool idShared = fakeID == layer->m_player1->m_uniqueID
+            || (layer->m_player2 && fakeID == layer->m_player2->m_uniqueID);
+        if (!idShared) {
+            auto& activated = layer->m_gameState.m_activatedObjectIDs;
+            for (auto it = activated.begin(); it != activated.end();) {
+                if (it->first.second == fakeID) it = activated.erase(it);
+                else ++it;
+            }
         }
 
         fake->stopParticles();
         if (fake->m_isDashing) fake->stopDashing();
-    }
-
-    Outcome runBranch(GJBaseGameLayer* layer, PlayerObject* fake, PlayerObject* real, bool heldNow, Plan const& plan, int& budget) {
-        auto const& cfg = ibConfig();
-        g_dead = false;
-        g_stop = false;
-
-        prepare(fake, real, heldNow);
-
-        float dt = ibRuntime().lastDt;
-        int decisionEnd = plan.delay + plan.keepFor;
-        int toggleAt = plan.toggleAfter >= 0 ? decisionEnd + plan.toggleAfter : -1;
-        int settleStart = toggleAt >= 0 ? toggleAt : decisionEnd;
-        int maxT = settleStart + std::max(cfg.flyWindow, kGroundSettleMax);
-
-        Outcome result = Outcome::Survived;
-        for (int t = 0; t <= maxT; ++t) {
-            if (--budget < 0) {
-                result = Outcome::Unknown;
-                break;
-            }
-
-            fake->resetCollisionLog(false);
-            layer->checkCollisions(fake, dt, false);
-            if (g_dead) {
-                result = Outcome::Died;
-                break;
-            }
-            if (g_stop) break;
-
-            if (t > settleStart) {
-                int since = t - settleStart;
-                if (isFlyMode(fake)) {
-                    if (since >= cfg.flyWindow) break;
-                }
-                else if (fake->m_isOnGround) {
-                    // Landed: you are back in control, the next click is yours.
-                    break;
-                }
-            }
-
-            if (t == plan.delay) setButton(fake, plan.down);
-            if (t == toggleAt) setButton(fake, !plan.down);
-
-            fake->update(dt);
-            fake->updateSpecial(dt);
-            fake->updateRotation(dt);
-        }
-
-        restoreWorld(layer, fake);
-        return result;
     }
 
     struct Evaluator {
@@ -153,24 +145,88 @@ namespace {
         bool heldNow;
         bool down;
         int budget;
+        Clock::time_point deadline;
+        int steps = 0;
+        bool timedOut = false;
+
+        bool outOfTime() {
+            if (budget <= 0) timedOut = true;
+            else if ((steps & 31) == 0 && Clock::now() > deadline) timedOut = true;
+            return timedOut;
+        }
 
         int branchOffset(int i) const {
             return down ? kPressBranches[i] : kReleaseBranches[i];
         }
 
+        Outcome runBranch(PlayerObject* fake, PlayerObject* real, Plan const& plan, std::vector<CCPoint>* path) {
+            auto const& cfg = ibConfig();
+            g_dead = false;
+            g_stop = false;
+
+            prepare(fake, real, heldNow);
+
+            float dt = ibRuntime().lastDt;
+            int decisionEnd = plan.delay + plan.keepFor;
+            int toggleAt = plan.toggleAfter >= 0 ? decisionEnd + plan.toggleAfter : -1;
+            int settleStart = toggleAt >= 0 ? toggleAt : decisionEnd;
+            int maxT = settleStart + std::max(cfg.flyWindow, kGroundSettleMax);
+
+            Outcome result = Outcome::Survived;
+            for (int t = 0; t <= maxT; ++t) {
+                --budget;
+                ++steps;
+                if (outOfTime()) {
+                    result = Outcome::Unknown;
+                    break;
+                }
+
+                fake->resetCollisionLog(false);
+                layer->checkCollisions(fake, dt, false);
+                if (g_dead) {
+                    result = Outcome::Died;
+                    break;
+                }
+                if (g_stop) break;
+
+                if (t > settleStart) {
+                    int since = t - settleStart;
+                    if (isFlyMode(fake)) {
+                        if (since >= cfg.flyWindow) break;
+                    }
+                    else if (fake->m_isOnGround) {
+                        // Landed: you are back in control, the next click is yours.
+                        break;
+                    }
+                }
+
+                if (t == plan.delay) setButton(fake, plan.down);
+                if (t == toggleAt) setButton(fake, !plan.down);
+
+                fake->update(dt);
+                fake->updateSpecial(dt);
+                fake->updateRotation(dt);
+                if (path) path->push_back(fake->getPosition());
+            }
+
+            restoreWorld(layer, fake);
+            return result;
+        }
+
         // A branch counts only if every moved player survives it (one key moves both in dual).
-        Outcome runShared(int delay, int branch) {
+        Outcome runShared(int delay, int branch, std::vector<CCPoint>* paths = nullptr) {
             Plan plan { delay, down, ibConfig().assumedHold, branchOffset(branch) };
             Outcome worst = Outcome::Survived;
-            for (auto& [real, fake] : pairs) {
-                auto out = runBranch(layer, fake, real, heldNow, plan, budget);
+            for (size_t i = 0; i < pairs.size(); ++i) {
+                auto [real, fake] = pairs[i];
+                auto out = runBranch(fake, real, plan, paths ? &paths[i] : nullptr);
                 if (out == Outcome::Died) return Outcome::Died;
                 if (out == Outcome::Unknown) worst = Outcome::Unknown;
             }
             return worst;
         }
 
-        // Is there any way to continue after this timing? Unknown (budget ran out) counts
+        // Is there any way to continue after this timing? Unknown (out of time) counts
         // as safe only for the on-time input, so we never add delay on a guess.
         bool viable(int delay) {
             for (int b = 0; b < kBranchCount; ++b) {
@@ -184,11 +240,54 @@ namespace {
         // How forgiving is this timing: number of continuations that survive.
         int score(int delay) {
             int count = 0;
-            for (int b = 0; b < kBranchCount; ++b) {
+            for (int b = 0; b < kBranchCount && !timedOut; ++b) {
                 if (runShared(delay, b) == Outcome::Survived) ++count;
-                if (budget <= 0) break;
             }
             return count;
+        }
+
+        // Debug: record the first surviving continuation of this timing (or branch 0 if none).
+        void record(int delay, std::vector<CCPoint>* paths) {
+            budget = std::max(budget, 4000);
+            timedOut = false;
+            deadline = Clock::now() + std::chrono::milliseconds(50);
+            for (int b = 0; b < kBranchCount; ++b) {
+                for (size_t i = 0; i < pairs.size(); ++i) paths[i].clear();
+                if (runShared(delay, b, paths) == Outcome::Survived) return;
+            }
+            for (size_t i = 0; i < pairs.size(); ++i) paths[i].clear();
+            runShared(delay, 0, paths);
+        }
+
+        int choose() {
+            auto const& cfg = ibConfig();
+            int first = -1;
+            for (int d = 1; d <= cfg.bufferTicks && !timedOut; ++d) {
+                if (viable(d)) {
+                    first = d;
+                    break;
+                }
+            }
+            if (first < 0) return 0;  // nothing in range saves it: act normally
+            if (!cfg.safest) return first;
+
+            // Path of least resistance: the timing that leaves the most ways to keep going.
+            // Ties go to the earliest tick that still has a safe neighbour (1 tick margin).
+            int last = std::min(cfg.bufferTicks, first + kSafestSpan);
+            std::vector<int> scores(last + 2, -1);
+            int best = 0;
+            for (int d = first; d <= last && !timedOut; ++d) {
+                scores[d] = score(d);
+                best = std::max(best, scores[d]);
+            }
+            if (best <= 0) return first;
+            int pick = -1;
+            for (int d = first; d <= last; ++d) {
+                if (scores[d] != best) continue;
+                if (scores[d + 1] == best) return d;
+                if (pick < 0) pick = d;
+            }
+            return pick > 0 ? pick : first;
         }
     };
 
@@ -214,6 +313,11 @@ namespace sim {
             layer->m_objectLayer->addChild(p);
             fake = p;
         }
+        auto draw = CCDrawNode::create();
+        draw->setID("debug-paths"_spr);
+        draw->m_bUseArea = false;  // otherwise segments are culled on some levels
+        layer->m_objectLayer->addChild(draw, 9999);
+        g_debugDraw = draw;
     }
 
     void teardown() {
@@ -221,6 +325,8 @@ namespace sim {
             if (fake) fake->removeFromParent();
             fake = nullptr;
         }
+        if (g_debugDraw) g_debugDraw->removeFromParent();
+        g_debugDraw = nullptr;
         g_touched.clear();
     }
 
@@ -230,50 +336,57 @@ namespace sim {
         return true;
     }
 
-    int decideShift(GJBaseGameLayer* layer, std::vector<PlayerObject*> const& players, bool heldNow, bool down) {
+    Decision decide(GJBaseGameLayer* layer, std::vector<PlayerObject*> const& players, bool heldNow, bool down) {
         auto const& cfg = ibConfig();
-        if (players.empty() || players.size() > 2) return 0;
+        Decision result;
+        if (players.empty() || players.size() > 2) return result;
 
-        Evaluator ev { layer, {}, heldNow, down, cfg.simBudget };
-        for (size_t i = 0; i < players.size(); ++i) {
-            auto real = players[i];
+        auto start = Clock::now();
+        Evaluator ev { layer, {}, heldNow, down, cfg.simBudget, start + std::chrono::milliseconds(cfg.timeLimitMs) };
+        std::vector<RealSnapshot> snapshots;
+        for (auto real : players) {
             auto fake = g_fakes[real == layer->m_player2 ? 1 : 0].data();
-            if (!real || !fake || real->m_isDead) return 0;
+            if (!real || !fake || real->m_isDead) return result;
             ev.pairs.emplace_back(real, fake);
+            snapshots.emplace_back(real);
         }
 
-        ActiveGuard guard;
+        {
+            ActiveGuard guard;
 
-        // On time and survivable: never touch it (keeps spam / straight-fly exactly normal).
-        if (ev.viable(0)) return 0;
+            // On time and survivable: never touch it (keeps spam / straight-fly exactly normal).
+            result.onTimeViable = ev.viable(0);
+            if (!result.onTimeViable) result.shift = ev.choose();
+            result.steps = ev.steps;
+            result.timedOut = ev.timedOut;
 
-        int first = -1;
-        for (int d = 1; d <= cfg.bufferTicks && ev.budget > 0; ++d) {
-            if (ev.viable(d)) {
-                first = d;
-                break;
+            if (cfg.debug) {
+                if (!result.onTimeViable) ev.record(0, result.onTime);
+                ev.record(result.shift, result.predicted);
             }
         }
-        if (first < 0) return 0;  // nothing in range saves it: act normally
-        if (!cfg.safest) return first;
 
-        // Path of least resistance: the timing that leaves the most ways to keep going.
-        // Ties go to the earliest tick that still has a safe neighbour (1 tick margin).
-        int last = std::min(cfg.bufferTicks, first + kSafestSpan);
-        std::vector<int> scores(last + 2, -1);
-        int best = 0;
-        for (int d = first; d <= last && ev.budget > 0; ++d) {
-            scores[d] = ev.score(d);
-            best = std::max(best, scores[d]);
+        for (auto const& snap : snapshots) {
+            if (snap.restoreIfChanged()) result.realChanged = true;
         }
-        if (best <= 0) return first;
-        int pick = -1;
-        for (int d = first; d <= last; ++d) {
-            if (scores[d] != best) continue;
-            if (scores[d + 1] == best) return d;
-            if (pick < 0) pick = d;
-        }
-        return pick > 0 ? pick : first;
+        result.ms = std::chrono::duration<double, std::milli>(Clock::now() - start).count();
+        return result;
+    }
+
+    void drawDebug(Decision const& decision) {
+        if (!g_debugDraw) return;
+        g_debugDraw->clear();
+        auto line = [](std::vector<CCPoint> const& path, ccColor4F color) {
+            for (size_t i = 1; i < path.size(); ++i) {
+                g_debugDraw->drawSegment(path[i - 1], path[i], .8f, color);
+            }
+        };
+        for (auto const& path : decision.onTime) line(path, { 1.f, .2f, .2f, 1.f });
+        for (auto const& path : decision.predicted) line(path, { .2f, 1.f, .3f, 1.f });
+    }
+
+    void clearDebug() {
+        if (g_debugDraw) g_debugDraw->clear();
     }
 }
 

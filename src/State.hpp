@@ -16,7 +16,9 @@ struct BufferConfig {
     bool hotkeys = true;
     int assumedHold = 12;
     int flyWindow = 30;
-    int simBudget = 12000;
+    int simBudget = 6000;
+    int timeLimitMs = 8;
+    bool debug = false;
 };
 
 BufferConfig& ibConfig();

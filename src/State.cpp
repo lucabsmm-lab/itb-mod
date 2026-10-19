@@ -57,6 +57,8 @@ static void loadAll() {
     c.assumedHold = static_cast<int>(mod->getSettingValue<int64_t>("assumed-hold"));
     c.flyWindow = static_cast<int>(mod->getSettingValue<int64_t>("fly-window"));
     c.simBudget = static_cast<int>(mod->getSettingValue<int64_t>("sim-budget"));
+    c.timeLimitMs = static_cast<int>(mod->getSettingValue<int64_t>("time-limit"));
+    c.debug = mod->getSettingValue<bool>("debug");
 }
 
 $on_mod(Loaded) {
@@ -64,10 +66,10 @@ $on_mod(Loaded) {
     for (auto key : {"timing-style", "indicator-position"}) {
         listenForSettingChanges<std::string>(key, [](std::string) { loadAll(); });
     }
-    for (auto key : {"enabled", "safe-mode", "show-indicator", "hotkeys"}) {
+    for (auto key : {"enabled", "safe-mode", "show-indicator", "hotkeys", "debug"}) {
         listenForSettingChanges<bool>(key, [](bool) { loadAll(); });
     }
-    for (auto key : {"buffer-ticks", "assumed-hold", "fly-window", "sim-budget"}) {
+    for (auto key : {"buffer-ticks", "assumed-hold", "fly-window", "sim-budget", "time-limit"}) {
         listenForSettingChanges<int64_t>(key, [](int64_t) { loadAll(); });
     }
 }
