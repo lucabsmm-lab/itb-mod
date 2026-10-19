@@ -1,0 +1,90 @@
+{
+	"geode": "5.11.2",
+	"gd": {
+		"win": "2.2081"
+	},
+	"id": "lucabsmm-lab.input-buffer",
+	"name": "Input Buffer",
+	"version": "v1.0.0",
+	"developer": "lucabsmm-lab",
+	"description": "Buffers early clicks and releases by 2-16 ticks so they land on the first tick you survive.",
+	"dependencies": {
+		"geode.node-ids": ">=v1.23.3"
+	},
+	"settings": {
+		"enabled": {
+			"name": "Enabled",
+			"description": "Turn the input buffer on or off. Hotkeys: <cg>F1</c> = on, <cr>F2</c> = off.",
+			"type": "bool",
+			"default": true
+		},
+		"buffer-ticks": {
+			"name": "Buffer Ticks",
+			"description": "How many ticks (1 tick = 1/240 s) an early click or release can be held back. Hotkeys: 0+2, 0+4, 0+6, 0+8, 1+0, 1+2, 1+4, 1+6.",
+			"type": "int",
+			"default": 10,
+			"min": 2,
+			"max": 16,
+			"control": {
+				"arrow-step": 2,
+				"slider-step": 2,
+				"big-arrows": false
+			}
+		},
+		"timing-style": {
+			"name": "Timing Style",
+			"description": "<cy>Safest</c>: picks the tick with the most room for error (path of least resistance).\n<cy>Earliest</c>: picks the first tick that survives (least added delay).",
+			"type": "string",
+			"default": "Safest",
+			"one-of": ["Safest", "Earliest"]
+		},
+		"safe-mode": {
+			"name": "Safe Mode",
+			"description": "While on, attempts where the buffer was enabled do not save progress, completions, stars, orbs or leaderboard scores.",
+			"type": "bool",
+			"default": true
+		},
+		"show-indicator": {
+			"name": "Show Indicator",
+			"description": "Show the on-screen buffer label during levels.",
+			"type": "bool",
+			"default": true
+		},
+		"indicator-position": {
+			"name": "Indicator Position",
+			"type": "string",
+			"default": "Top Left",
+			"one-of": ["Top Left", "Top Right", "Bottom Left", "Bottom Right"]
+		},
+		"hotkeys": {
+			"name": "Hotkeys",
+			"description": "Enable F1/F2 and the number-pair hotkeys.",
+			"type": "bool",
+			"default": true
+		},
+		"assumed-hold": {
+			"name": "Assumed Hold (ticks)",
+			"description": "After a click (or release) the buffer assumes you keep holding (or stay released) for at least this many ticks when checking if the input is doomed.",
+			"type": "int",
+			"default": 12,
+			"min": 2,
+			"max": 60
+		},
+		"fly-window": {
+			"name": "Fly Survive Window (ticks)",
+			"description": "Ship / UFO / wave / swing: how many ticks you must survive after your next input for a timing to count as safe. Cube / ball / robot / spider instead check until you land.",
+			"type": "int",
+			"default": 30,
+			"min": 4,
+			"max": 240
+		},
+		"sim-budget": {
+			"name": "Look-ahead Budget",
+			"description": "Maximum simulated ticks per input. Lower this if you notice stutters when an input gets buffered.",
+			"type": "int",
+			"default": 12000,
+			"min": 1000,
+			"max": 60000
+		}
+	}
+}
