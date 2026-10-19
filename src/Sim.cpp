@@ -14,16 +14,15 @@
 namespace {
     using Clock = std::chrono::steady_clock;
 
-    constexpr int kMaxShift = 16;
     // Future clicks the look-ahead may plan after your input (at orbs and on the ground).
     constexpr int kMaxDepth = 3;
 
-    // Hidden players per real player: one saved state per tick of the "do nothing" path
-    // (0..kMaxShift), the candidate runner, then a runner + save per planning depth.
-    constexpr int kRunner = kMaxShift + 1;
-    constexpr int kPoolSize = kRunner + 1 + 2 * (kMaxDepth + 1);
-    constexpr int slotRunner(int depth) { return kRunner + 1 + 2 * depth; }
-    constexpr int slotSave(int depth) { return kRunner + 2 + 2 * depth; }
+    // Hidden players per real player: a fly-mode runner, then a runner + save per planning depth.
+    // Every option starts from the real player (copies of mid-air copies drift by a tick).
+    constexpr int kRunner = 0;
+    constexpr int kPoolSize = 1 + 2 * (kMaxDepth + 1);
+    constexpr int slotRunner(int depth) { return 1 + 2 * depth; }
+    constexpr int slotSave(int depth) { return 2 + 2 * depth; }
 
     std::vector<Ref<PlayerObject>> g_pools[2];
     std::unordered_set<int> g_poolIDs;
@@ -118,7 +117,25 @@ namespace {
         dst->m_isDead = false;
         dst->m_touchingRings->removeAllObjects();
         dst->m_touchedRings = src->m_touchedRings;
-        dst->resetCollisionLog(true);
+        // Keep the collision memory (what it stood on / last touched): wiping it makes a copy
+        // taken right at a landing jump one tick late.
+        dst->m_collisionLogTop->removeAllObjects();
+        dst->m_collisionLogBottom->removeAllObjects();
+        dst->m_collisionLogLeft->removeAllObjects();
+        dst->m_collisionLogRight->removeAllObjects();
+        dst->m_lastCollisionBottom = src->m_lastCollisionBottom;
+        dst->m_lastCollisionTop = src->m_lastCollisionTop;
+        dst->m_lastCollisionLeft = src->m_lastCollisionLeft;
+        dst->m_lastCollisionRight = src->m_lastCollisionRight;
+        dst->m_unk50C = src->m_unk50C;
+        dst->m_unk510 = src->m_unk510;
+        dst->m_maybeLastGroundObject = src->m_maybeLastGroundObject;
+        dst->m_preLastGroundObject = src->m_preLastGroundObject;
+        dst->m_lastGroundObject = src->m_lastGroundObject;
+        dst->m_collidedObject = src->m_collidedObject;
+        dst->m_currentSlope2 = src->m_currentSlope2;
+        dst->m_slopeAngle = src->m_slopeAngle;
+        dst->m_slopeStartTime = src->m_slopeStartTime;
         if (held) dst->pushButton(PlayerButton::Jump);
         // Holding is not the same as a fresh click: keep the source's buffered-jump state.
         dst->m_jumpBuffered = src->m_jumpBuffered;
@@ -157,8 +174,6 @@ namespace {
     struct PlayerSim {
         PlayerObject* real;
         std::vector<Ref<PlayerObject>>* pool;
-        int baseValid = 0;               // saved states 0..baseValid-1 are usable
-        std::vector<CCPoint> basePath;   // positions of the "do nothing" path (debug)
 
         PlayerObject* at(int i) const { return (*pool)[i].data(); }
     };
@@ -220,21 +235,6 @@ namespace {
             return kReleaseFly;
         }
 
-        // Save the "do nothing" path once: state after t ticks without the input, t = 0..maxShift.
-        void buildBase(PlayerSim& ps, int maxShift) {
-            auto runner = ps.at(kRunner);
-            copyState(ps.at(0), ps.real, heldNow);
-            copyState(runner, ps.real, heldNow);
-            ps.baseValid = 1;
-            for (int t = 1; t <= maxShift; ++t) {
-                if (tick(runner, -1, &ps.basePath) != Step::Ok) break;
-                copyState(ps.at(t), runner, heldNow);
-                ps.baseValid = t + 1;
-            }
-            quiet(runner);
-            restoreWorld(layer);
-        }
-
         // Undo what deeper planning levels left behind, so the next attempt starts clean.
         void cleanDeeper(PlayerSim& ps, int depth) {
             std::unordered_set<int> ids;
@@ -249,7 +249,7 @@ namespace {
         // Ground modes: from `src`, can you keep going if you click like a player would?
         // At every orb you overlap and every landing we try "click here" (up to `depth` more
         // clicks deep). With no clicks left, reaching the next chance to click alive is enough.
-        bool canContinue(PlayerSim& ps, int depth, PlayerObject* src, bool srcHeld, bool startClick, std::vector<CCPoint>* path) {
+        bool canContinue(PlayerSim& ps, int depth, PlayerObject* src, bool srcHeld, bool startClick, std::vector<CCPoint>* path, int waitTicks = 0) {
             auto runner = ps.at(slotRunner(depth));
             auto save = ps.at(slotSave(depth));
             copyState(runner, src, srcHeld);
@@ -272,6 +272,16 @@ namespace {
                 if (ok) return succeed(&child);
                 return false;
             };
+
+            // Held back: the button stays as it is for `waitTicks` first.
+            for (int t = 0; t < waitTicks; ++t) {
+                auto step = tick(runner, -1, trace);
+                if (step == Step::Dead || step == Step::OutOfTime) {
+                    quiet(runner);
+                    return false;
+                }
+                if (step == Step::Stop) return succeed(nullptr);
+            }
 
             int hold = clickHold();
             int clickEnd = startClick ? hold : 0;
@@ -336,11 +346,9 @@ namespace {
         // Ground modes: your input is the first click of the plan, so the next orb or landing can
         // be planned for straight away (dense orb chains don't leave a 12-tick gap).
         Outcome runGroundCandidate(PlayerSim& ps, int delay, std::vector<CCPoint>* path) {
-            if (delay >= ps.baseValid) return Outcome::DiedEarly;  // dead before the input lands
-            if (path) path->assign(ps.basePath.begin(), ps.basePath.begin() + std::min<size_t>(delay, ps.basePath.size()));
-
+            if (path) path->clear();
             Outcome result = Outcome::Survived;
-            if (!canContinue(ps, kMaxDepth, ps.at(delay), heldNow, down, path)) {
+            if (!canContinue(ps, kMaxDepth, ps.real, heldNow, down, path, delay)) {
                 result = timedOut ? Outcome::Unknown : Outcome::Died;
             }
             restoreWorld(layer);
@@ -350,11 +358,18 @@ namespace {
         // Fly modes: one timing (delay), one continuation (toggle-back offset).
         Outcome runFlyCandidate(PlayerSim& ps, int delay, int toggleAfter, std::vector<CCPoint>* path) {
             auto const& cfg = ibConfig();
-            if (delay >= ps.baseValid) return Outcome::DiedEarly;
-
             auto runner = ps.at(kRunner);
-            copyState(runner, ps.at(delay), heldNow);
-            if (path) path->assign(ps.basePath.begin(), ps.basePath.begin() + std::min<size_t>(delay, ps.basePath.size()));
+            copyState(runner, ps.real, heldNow);
+            if (path) path->clear();
+            for (int t = 0; t < delay; ++t) {
+                auto step = tick(runner, -1, path);
+                if (step == Step::Dead || step == Step::Stop || step == Step::OutOfTime) {
+                    quiet(runner);
+                    restoreWorld(layer);
+                    if (step == Step::Dead) return Outcome::DiedEarly;
+                    return step == Step::Stop ? Outcome::Survived : Outcome::Unknown;
+                }
+            }
 
             int keepFor = cfg.assumedHold;
             int toggleAt = toggleAfter >= 0 ? keepFor + toggleAfter : -1;
@@ -543,11 +558,11 @@ namespace sim {
             snapshots.emplace_back(real);
         }
 
+        // A hidden player hitting a spike sets GD's "a player died" flag, which turns on
+        // "show hitboxes on death" even though you survived. Put it back afterwards.
+        bool playerDied = layer->m_playerDied;
         {
             ActiveGuard guard;
-
-            int maxShift = std::min(cfg.bufferTicks, kMaxShift);
-            for (auto& ps : ev.players) ev.buildBase(ps, maxShift);
 
             // On time and survivable: never touch it (keeps spam / straight-fly exactly normal).
             result.onTimeViable = ev.viable(0);
@@ -561,6 +576,7 @@ namespace sim {
             }
         }
 
+        layer->m_playerDied = playerDied;
         for (auto const& snap : snapshots) {
             if (snap.restoreIfChanged()) result.realChanged = true;
         }
