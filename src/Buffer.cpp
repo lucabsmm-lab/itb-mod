@@ -12,8 +12,8 @@ namespace {
     constexpr size_t kMaxQueue = 16;
 
     // Debug mode: compares the real run, tick by tick, with what the look-ahead predicted.
-    // Offset 0 assumes the input was decided inside the tick's command processing, offset 1
-    // assumes it came one tick earlier; whichever matches tells us how GD orders things.
+    // GD applies an input to the *next* tick's movement, so predicted[0] lines up with the
+    // real position one tick after the decision.
     struct DriftTrack {
         bool active = false;
         int startTick = 0;
@@ -22,8 +22,8 @@ namespace {
         int length = 0;
         std::vector<PlayerObject*> players;
         std::vector<CCPoint> predicted[2];
-        float maxErr[2] = { 0.f, 0.f };
-        int firstBad[2] = { -1, -1 };
+        float maxErr = 0.f;
+        int firstBad = -1;
         int compared = 0;
     };
     DriftTrack g_drift;
@@ -32,8 +32,8 @@ namespace {
         if (!g_drift.active) return;
         g_drift.active = false;
         log::info(
-            "[IB] drift check ended ({}): {} ticks compared | offset0 max err {:.2f} (first >2u at tick {}) | offset1 max err {:.2f} (first >2u at tick {})",
-            why, g_drift.compared, g_drift.maxErr[0], g_drift.firstBad[0], g_drift.maxErr[1], g_drift.firstBad[1]
+            "[IB] drift check ended ({}): {} ticks compared | max error {:.2f} units (first tick off by more than 2: {})",
+            why, g_drift.compared, g_drift.maxErr, g_drift.firstBad
         );
     }
 
@@ -51,26 +51,23 @@ namespace {
 
     void stepDrift() {
         if (!g_drift.active) return;
-        int k = ibRuntime().tick - g_drift.startTick;
-        for (int offset = 0; offset < 2; ++offset) {
-            int index = k - offset;
-            if (index < 0) continue;
-            for (size_t p = 0; p < g_drift.players.size() && p < 2; ++p) {
-                auto const& path = g_drift.predicted[p];
-                if (index >= static_cast<int>(path.size())) continue;
-                auto real = g_drift.players[p]->getPosition();
-                float err = std::hypot(real.x - path[index].x, real.y - path[index].y);
-                g_drift.maxErr[offset] = std::max(g_drift.maxErr[offset], err);
-                if (err > 2.f && g_drift.firstBad[offset] < 0) g_drift.firstBad[offset] = index;
-            }
+        int index = ibRuntime().tick - g_drift.startTick - 1;
+        if (index < 0) return;
+        for (size_t p = 0; p < g_drift.players.size() && p < 2; ++p) {
+            auto const& path = g_drift.predicted[p];
+            if (index >= static_cast<int>(path.size())) continue;
+            auto real = g_drift.players[p]->getPosition();
+            float err = std::hypot(real.x - path[index].x, real.y - path[index].y);
+            g_drift.maxErr = std::max(g_drift.maxErr, err);
+            if (err > 2.f && g_drift.firstBad < 0) g_drift.firstBad = index;
         }
-        g_drift.compared = k + 1;
-        if (k >= g_drift.length) finishDrift("covered delay + assumed hold");
+        g_drift.compared = index + 1;
+        if (index >= g_drift.length) finishDrift("covered delay + assumed hold");
     }
 
     void logDecision(sim::Decision const& d, bool down, bool isPlayer1, size_t playerCount) {
         log::info(
-            "[IB] {} P{}{}: as pressed {} -> hold back {} ticks | {} sim ticks in {:.2f} ms (dt {:.4f}){}{}",
+            "[IB] {} (P{} key){}: as pressed {} -> hold back {} ticks | {} sim ticks in {:.2f} ms (dt {:.4f}){}{}",
             down ? "press" : "release", isPlayer1 ? 1 : 2, playerCount == 2 ? " (dual, both players)" : "",
             d.onTimeViable ? "survives" : "DOOMED", d.shift, d.steps, d.ms, ibRuntime().lastDt,
             d.timedOut ? " | TIME LIMIT HIT" : "",
@@ -202,11 +199,19 @@ class $modify(IBGameLayer, GJBaseGameLayer) {
 
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         auto pl = PlayLayer::get();
-        if (pl && static_cast<GJBaseGameLayer*>(pl) == this) {
+        bool ours = pl && static_cast<GJBaseGameLayer*>(pl) == this;
+        if (ours) {
             auto& rt = ibRuntime();
             rt.tick++;
             if (ibConfig().enabled) rt.usedThisAttempt = true;
+        }
 
+        GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
+
+        if (ours) {
+            // Release held-back inputs at the end of their tick: that is the same point a
+            // normal click lands, so it moves the player from the next tick on (as simulated).
+            auto& rt = ibRuntime();
             for (int i = 0; i < 2; ++i) {
                 auto& ch = rt.channels[i];
                 while (!ch.queue.empty() && ch.queue.front().fireTick <= rt.tick) {
@@ -216,9 +221,8 @@ class $modify(IBGameLayer, GJBaseGameLayer) {
                 }
                 if (ch.queue.empty()) ch.lastShift = 0;
             }
+            stepDrift();
         }
-        GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
-        if (pl && static_cast<GJBaseGameLayer*>(pl) == this) stepDrift();
     }
 };
 
