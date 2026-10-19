@@ -19,6 +19,9 @@ jobs:
           sdk: given
           combine: true
           target: Win64
+                    # Bindings as of the Geode v5.11.2 release (GD 2.2081).
+          # Newer bindings target GD 2.2091 and don't build with this SDK.
+          bindings-ref: 1605f500d053f8de122bf5c7dc6d17c24866e02e
 
   package:
     name: Package
