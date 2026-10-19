@@ -1,3 +1,8 @@
+# v1.0.6
+- Fixed "show hitboxes on death" turning on while you were still alive (a hidden look-ahead cube dying set GD's death flag).
+- Every timing option is now simulated from your real cube instead of a saved copy, and copies keep their collision memory. Fixes held-back jumps right at a landing coming out 1 tick early.
+- Uses far fewer hidden players.
+
 # v1.0.5
 - Held-back inputs are now handed to the game at the same point GD processes real clicks (they could land 1 tick off, which is exactly the doomed timing).
 - Cube / ball / spider: your click is treated as a tap, so the next orb can be planned right away (dense orb chains no longer look like dead ends). Robot keeps the assumed hold.
