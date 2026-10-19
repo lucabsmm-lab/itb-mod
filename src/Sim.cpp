@@ -1,4 +1,5 @@
 #include "Sim.hpp"
+#include "GameStateCopy.hpp"
 
 #include <Geode/modify/GJBaseGameLayer.hpp>
 #include <Geode/modify/PlayerObject.hpp>
@@ -206,7 +207,7 @@ namespace {
 
     struct WorldSnapshot {
         GJBaseGameLayer* layer;
-        GJGameState state;
+        GameStateCopy state;
         bool playerDied;
         bool debugDraw;
         float cameraFlip;
@@ -220,18 +221,19 @@ namespace {
         WorldSnapshot* previous;
 
         explicit WorldSnapshot(GJBaseGameLayer* l)
-          : layer(l), state(l->m_gameState), playerDied(l->m_playerDied), debugDraw(l->m_isDebugDrawEnabled),
+          : layer(l), playerDied(l->m_playerDied), debugDraw(l->m_isDebugDrawEnabled),
             cameraFlip(l->m_cameraFlip), cameraWidthOffset(l->m_cameraWidthOffset),
             cameraHeightOffset(l->m_cameraHeightOffset), cameraUnzoomedHeightOffset(l->m_cameraUnzoomedHeightOffset),
             targetCameraHeightOffset(l->m_targetCameraHeightOffset),
             calculateTargetHeightOffset(l->m_calculateTargetHeightOffset),
             p1Block(l->m_player1CollisionBlock), p2Block(l->m_player2CollisionBlock), previous(g_world) {
+            state.save(l->m_gameState);
             g_world = this;
         }
 
         void restore() {
             if (g_worldDirty) {
-                layer->m_gameState = state;
+                state.load(layer->m_gameState);
                 g_worldDirty = false;
             }
             layer->m_playerDied = playerDied;
