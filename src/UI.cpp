@@ -38,8 +38,8 @@ namespace {
         }
 
         void update(float dt) override {
-            auto& rt = runtime();
-            auto const& c = config();
+            auto& rt = ibRuntime();
+            auto const& c = ibConfig();
             if (rt.bannerTimer > 0.f) rt.bannerTimer -= dt;
             if (rt.flashTimer > 0.f) rt.flashTimer -= dt;
 
@@ -106,7 +106,7 @@ namespace {
         bool init() {
             if (!Popup::init(360.f, 260.f)) return false;
             this->setTitle("Input Buffer");
-            auto const& c = config();
+            auto const& c = ibConfig();
 
             addToggle("Enabled", c.enabled, menu_selector(SettingsPopup::onEnabled), { -150.f, -52.f });
             auto hint = CCLabelBMFont::create("F1 = on   F2 = off", "chatFont.fnt");
@@ -147,7 +147,7 @@ namespace {
         void updateTicks() {
             for (auto btn : m_tickButtons) {
                 if (auto spr = typeinfo_cast<ButtonSprite*>(btn->getNormalImage())) {
-                    spr->updateBGImage(btn->getTag() == config().bufferTicks ? "GJ_button_01.png" : "GJ_button_04.png");
+                    spr->updateBGImage(btn->getTag() == ibConfig().bufferTicks ? "GJ_button_01.png" : "GJ_button_04.png");
                 }
             }
         }
@@ -176,7 +176,7 @@ namespace {
         }
 
         void onPosition(CCObject*) {
-            auto const& current = config().indicatorPos;
+            auto const& current = ibConfig().indicatorPos;
             size_t next = 0;
             for (size_t i = 0; i < 4; ++i) {
                 if (current == kPositions[i]) next = (i + 1) % 4;
@@ -186,7 +186,7 @@ namespace {
         }
 
         void onStyle(CCObject*) {
-            std::string next = config().safest ? "Earliest" : "Safest";
+            std::string next = ibConfig().safest ? "Earliest" : "Safest";
             Mod::get()->setSettingValue<std::string>("timing-style", next);
             m_styleSprite->setString(next.c_str());
         }

@@ -26,7 +26,7 @@ namespace {
     }
 
     bool bufferingAllowed(PlayLayer* pl) {
-        return config().enabled
+        return ibConfig().enabled
             && !pl->m_isPlatformer
             && !pl->m_hasCompletedLevel
             && pl->m_player1 && !pl->m_player1->m_isDead;
@@ -46,7 +46,7 @@ namespace {
 
     // Before a respawn, make sure the game's button state matches the real key.
     void settleChannels(GJBaseGameLayer* layer) {
-        auto& rt = runtime();
+        auto& rt = ibRuntime();
         for (int i = 0; i < 2; ++i) {
             auto& ch = rt.channels[i];
             ch.queue.clear();
@@ -62,7 +62,7 @@ namespace {
         bool oldTestMode = false;
 
         explicit SafeModeGuard(PlayLayer* pl)
-          : layer(pl), active(config().safeMode && runtime().usedThisAttempt) {
+          : layer(pl), active(ibConfig().safeMode && ibRuntime().usedThisAttempt) {
             if (active) {
                 oldTestMode = layer->m_isTestMode;
                 layer->m_isTestMode = true;
@@ -82,7 +82,7 @@ class $modify(IBGameLayer, GJBaseGameLayer) {
             return GJBaseGameLayer::handleButton(down, button, isPlayer1);
         }
 
-        auto& rt = runtime();
+        auto& rt = ibRuntime();
         auto& ch = rt.channels[isPlayer1 ? 0 : 1];
         ch.physical = down;
 
@@ -121,9 +121,9 @@ class $modify(IBGameLayer, GJBaseGameLayer) {
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         auto pl = PlayLayer::get();
         if (pl && static_cast<GJBaseGameLayer*>(pl) == this) {
-            auto& rt = runtime();
+            auto& rt = ibRuntime();
             rt.tick++;
-            if (config().enabled) rt.usedThisAttempt = true;
+            if (ibConfig().enabled) rt.usedThisAttempt = true;
 
             for (int i = 0; i < 2; ++i) {
                 auto& ch = rt.channels[i];
@@ -141,14 +141,14 @@ class $modify(IBGameLayer, GJBaseGameLayer) {
 
 class $modify(IBPlayLayer, PlayLayer) {
     bool init(GJGameLevel* level, bool useReplay, bool dontCreateObjects) {
-        auto& rt = runtime();
+        auto& rt = ibRuntime();
         rt.clearQueues();
         for (auto& ch : rt.channels) {
             ch.held = false;
             ch.physical = false;
         }
         rt.tick = 0;
-        rt.usedThisAttempt = config().enabled;
+        rt.usedThisAttempt = ibConfig().enabled;
 
         if (!PlayLayer::init(level, useReplay, dontCreateObjects)) return false;
 
@@ -161,11 +161,11 @@ class $modify(IBPlayLayer, PlayLayer) {
     void resetLevel() {
         settleChannels(this);
         PlayLayer::resetLevel();
-        runtime().usedThisAttempt = config().enabled;
+        ibRuntime().usedThisAttempt = ibConfig().enabled;
     }
 
     void onQuit() {
-        runtime().clearQueues();
+        ibRuntime().clearQueues();
         sim::teardown();
         PlayLayer::onQuit();
     }

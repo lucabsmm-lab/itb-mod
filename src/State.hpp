@@ -6,7 +6,7 @@
 using namespace geode::prelude;
 
 // Cached copy of the mod settings (read every tick, so we avoid setting lookups).
-struct Config {
+struct BufferConfig {
     bool enabled = true;
     int bufferTicks = 10;
     bool safest = true;        // timing style: true = Safest, false = Earliest
@@ -19,7 +19,7 @@ struct Config {
     int simBudget = 12000;
 };
 
-Config& config();
+BufferConfig& ibConfig();
 
 // Setters that also write the Geode setting (so the settings menu stays in sync).
 void setEnabled(bool on);
@@ -39,7 +39,7 @@ struct Channel {
     bool physical = false;  // what the player is actually pressing right now
 };
 
-struct Runtime {
+struct BufferRuntime {
     int tick = 0;
     Channel channels[2];
     bool usedThisAttempt = false;
@@ -53,7 +53,7 @@ struct Runtime {
     void clearQueues();
 };
 
-Runtime& runtime();
+BufferRuntime& ibRuntime();
 
 // Shows the ON/OFF banner on the indicator (and a notification outside levels).
 void announceState(bool alsoNotify);

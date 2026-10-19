@@ -97,13 +97,13 @@ namespace {
     }
 
     Outcome runBranch(GJBaseGameLayer* layer, PlayerObject* fake, PlayerObject* real, bool heldNow, Plan const& plan, int& budget) {
-        auto const& cfg = config();
+        auto const& cfg = ibConfig();
         g_dead = false;
         g_stop = false;
 
         prepare(fake, real, heldNow);
 
-        float dt = runtime().lastDt;
+        float dt = ibRuntime().lastDt;
         int decisionEnd = plan.delay + plan.keepFor;
         int toggleAt = plan.toggleAfter >= 0 ? decisionEnd + plan.toggleAfter : -1;
         int settleStart = toggleAt >= 0 ? toggleAt : decisionEnd;
@@ -160,7 +160,7 @@ namespace {
 
         // A branch counts only if every moved player survives it (one key moves both in dual).
         Outcome runShared(int delay, int branch) {
-            Plan plan { delay, down, config().assumedHold, branchOffset(branch) };
+            Plan plan { delay, down, ibConfig().assumedHold, branchOffset(branch) };
             Outcome worst = Outcome::Survived;
             for (auto& [real, fake] : pairs) {
                 auto out = runBranch(layer, fake, real, heldNow, plan, budget);
@@ -231,7 +231,7 @@ namespace sim {
     }
 
     int decideShift(GJBaseGameLayer* layer, std::vector<PlayerObject*> const& players, bool heldNow, bool down) {
-        auto const& cfg = config();
+        auto const& cfg = ibConfig();
         if (players.empty() || players.size() > 2) return 0;
 
         Evaluator ev { layer, {}, heldNow, down, cfg.simBudget };
@@ -400,7 +400,7 @@ class $modify(IBSimPlayer, PlayerObject) {
     void update(float dt) {
         if (!sim::active) {
             if (auto pl = PlayLayer::get(); pl && (this == pl->m_player1 || this == pl->m_player2)) {
-                runtime().lastDt = dt;
+                ibRuntime().lastDt = dt;
             }
         }
         PlayerObject::update(dt);

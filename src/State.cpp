@@ -1,16 +1,16 @@
 #include "State.hpp"
 
-Config& config() {
-    static Config c;
+BufferConfig& ibConfig() {
+    static BufferConfig c;
     return c;
 }
 
-Runtime& runtime() {
-    static Runtime r;
+BufferRuntime& ibRuntime() {
+    static BufferRuntime r;
     return r;
 }
 
-void Runtime::clearQueues() {
+void BufferRuntime::clearQueues() {
     for (auto& ch : channels) {
         ch.queue.clear();
         ch.lastShift = 0;
@@ -24,19 +24,19 @@ static int snapTicks(int ticks) {
 
 void setEnabled(bool on) {
     Mod::get()->setSettingValue<bool>("enabled", on);
-    config().enabled = on;
+    ibConfig().enabled = on;
 }
 
 void setBufferTicks(int ticks) {
     ticks = snapTicks(ticks);
     Mod::get()->setSettingValue<int64_t>("buffer-ticks", ticks);
-    config().bufferTicks = ticks;
+    ibConfig().bufferTicks = ticks;
 }
 
 void announceState(bool alsoNotify) {
-    runtime().bannerTimer = 2.f;
+    ibRuntime().bannerTimer = 2.f;
     if (alsoNotify && !PlayLayer::get()) {
-        auto& c = config();
+        auto& c = ibConfig();
         auto text = c.enabled
             ? fmt::format("Input Buffer: ON ({} ticks)", c.bufferTicks)
             : std::string("Input Buffer: OFF");
@@ -46,7 +46,7 @@ void announceState(bool alsoNotify) {
 
 static void loadAll() {
     auto mod = Mod::get();
-    auto& c = config();
+    auto& c = ibConfig();
     c.enabled = mod->getSettingValue<bool>("enabled");
     c.bufferTicks = snapTicks(static_cast<int>(mod->getSettingValue<int64_t>("buffer-ticks")));
     c.safest = mod->getSettingValue<std::string>("timing-style") != "Earliest";

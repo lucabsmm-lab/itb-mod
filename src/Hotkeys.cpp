@@ -30,7 +30,7 @@ namespace {
             g_digitHeld[digit] = down;
             if (!down || wasHeld || repeat) return;
         }
-        if (!down || repeat || !config().hotkeys) return;
+        if (!down || repeat || !ibConfig().hotkeys) return;
 
         if (key == KEY_F1) {
             setEnabled(true);
@@ -48,7 +48,7 @@ namespace {
             if (other == digit || !g_digitHeld[other]) continue;
             if (int ticks = ticksForPair(digit, other)) {
                 setBufferTicks(ticks);
-                runtime().flashTimer = .35f;
+                ibRuntime().flashTimer = .35f;
                 if (!PlayLayer::get()) {
                     Notification::create(fmt::format("Input Buffer: {} ticks", ticks), NotificationIcon::Info, 1.2f)->show();
                 }
