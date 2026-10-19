@@ -15,19 +15,23 @@ namespace {
     using Clock = std::chrono::steady_clock;
 
     constexpr int kMaxShift = 16;
+    // Future clicks the look-ahead may plan after your input (at orbs and on the ground).
+    constexpr int kMaxDepth = 2;
+
     // Hidden players per real player: one saved state per tick of the "do nothing" path
-    // (0..kMaxShift), then a runner, a landing save and a follow-up runner.
+    // (0..kMaxShift), the candidate runner, then a runner + save per planning depth.
     constexpr int kRunner = kMaxShift + 1;
-    constexpr int kLanding = kMaxShift + 2;
-    constexpr int kFollow = kMaxShift + 3;
-    constexpr int kPoolSize = kMaxShift + 4;
+    constexpr int kPoolSize = kRunner + 1 + 2 * (kMaxDepth + 1);
+    constexpr int slotRunner(int depth) { return kRunner + 1 + 2 * depth; }
+    constexpr int slotSave(int depth) { return kRunner + 2 + 2 * depth; }
 
     std::vector<Ref<PlayerObject>> g_pools[2];
     std::unordered_set<int> g_poolIDs;
     Ref<CCDrawNode> g_debugDraw;
 
-    bool g_dead = false;   // a hidden player died this tick
-    bool g_stop = false;   // the hidden player hit something we don't simulate (portal, end, ...)
+    bool g_dead = false;                 // a hidden player died this tick
+    bool g_stop = false;                 // it hit something we don't simulate (portal, end, ...)
+    RingObject* g_ringTouched = nullptr; // it overlapped this orb this tick
 
     // Activation flags of objects a hidden player touched, restored after every run.
     struct SavedFlags {
@@ -44,22 +48,19 @@ namespace {
     enum class Outcome { Died, DiedEarly, Survived, Unknown };
     enum class Step { Ok, Dead, Stop, OutOfTime };
 
-    // Toggle-back offsets tried after the assumed hold (-1 = never). Order matters for the
-    // early exit: the most natural continuation goes first. Cube/ball/spider barely care
-    // when you let go, robot does a little, fly modes a lot.
+    // Fly modes (ship / UFO / wave / swing): toggle-back offsets tried after the assumed
+    // hold (-1 = never). The most natural continuation goes first for the early exit.
     constexpr int kPressFly[] = { 0, -1, 6, 12, 24, 48 };
     constexpr int kReleaseFly[] = { -1, 0, 6, 12, 24, 48 };
-    constexpr int kPressRobot[] = { 0, -1, 6, 12 };
-    constexpr int kPressGround[] = { 0, -1 };
-    constexpr int kReleaseGround[] = { -1, 0 };
+    // Ground modes (cube / ball / robot / spider) plan future clicks instead.
+    constexpr int kGroundPlan[] = { 0 };
 
-    // After landing, "can I still get out of here?": stand still for kStandTicks, or jump at
-    // one of these offsets.
-    constexpr int kStandTicks = 20;
-    constexpr int kEscapeJumps[] = { 0, 3, 6, 10, 14, 20 };
-    constexpr int kEscapeMax = 150;
-    constexpr int kGroundSettleMax = 240;  // stop looking for a landing after 1s
-    constexpr int kSafestSpan = 4;         // Safest mode scores this many ticks past the first safe one
+    constexpr int kClickHold = 4;          // a planned click is held this long
+    constexpr int kStandTicks = 20;        // standing this long on ground = fine
+    constexpr int kGroundJumps[] = { 0, 4, 8, 12 };  // planned jumps after landing (ticks on ground)
+    constexpr int kRingRetry = 3;          // second planned click on the same orb, ticks later
+    constexpr int kContinueHorizon = 180;  // surviving this long without dying = fine
+    constexpr int kSafestSpan = 4;         // Safest mode looks this many ticks past the first safe one
 
     bool isFlyMode(PlayerObject* p) {
         return p->m_isShip || p->m_isBird || p->m_isDart || p->m_isSwing;
@@ -126,18 +127,26 @@ namespace {
         dst->m_ringJumpRelated = src->m_ringJumpRelated;
     }
 
-    void restoreWorld(GJBaseGameLayer* layer) {
+    void restoreFlags() {
         for (auto& [obj, flags] : g_touched) {
             obj->m_activatedByPlayer1 = flags.p1;
             obj->m_activatedByPlayer2 = flags.p2;
         }
         g_touched.clear();
+    }
 
+    // Forget orb/pad activations made by these hidden-player IDs.
+    void forgetActivations(GJBaseGameLayer* layer, std::unordered_set<int> const& ids) {
         auto& activated = layer->m_gameState.m_activatedObjectIDs;
         for (auto it = activated.begin(); it != activated.end();) {
-            if (g_poolIDs.contains(it->first.second)) it = activated.erase(it);
+            if (ids.contains(it->first.second)) it = activated.erase(it);
             else ++it;
         }
+    }
+
+    void restoreWorld(GJBaseGameLayer* layer) {
+        restoreFlags();
+        forgetActivations(layer, g_poolIDs);
     }
 
     void quiet(PlayerObject* p) {
@@ -181,6 +190,7 @@ namespace {
             if (outOfTime()) return Step::OutOfTime;
             g_dead = false;
             g_stop = false;
+            g_ringTouched = nullptr;
             p->resetCollisionLog(false);
             layer->checkCollisions(p, dt, false);
             if (g_dead) return Step::Dead;
@@ -194,15 +204,14 @@ namespace {
             return Step::Ok;
         }
 
+        bool flyMode() const {
+            return isFlyMode(players.front().real);
+        }
+
         std::span<int const> branches() const {
-            auto p = players.front().real;
-            if (isFlyMode(p)) {
-                if (down) return kPressFly;
-                return kReleaseFly;
-            }
-            if (!down) return kReleaseGround;
-            if (p->m_isRobot) return kPressRobot;
-            return kPressGround;
+            if (!flyMode()) return kGroundPlan;
+            if (down) return kPressFly;
+            return kReleaseFly;
         }
 
         // Save the "do nothing" path once: state after t ticks without the input, t = 0..maxShift.
@@ -220,56 +229,143 @@ namespace {
             restoreWorld(layer);
         }
 
-        // From a landing: is there still a way out (stand still a bit, or jump soon)?
-        bool canEscape(PlayerSim& ps, bool held) {
-            auto landing = ps.at(kLanding);
-            auto runner = ps.at(kFollow);
-            copyState(landing, ps.at(kRunner), held);
-
-            auto attempt = [&](int jumpAt) -> bool {
-                copyState(runner, landing, held);
-                bool pressed = held;
-                for (int t = 0; t <= kEscapeMax; ++t) {
-                    int input = -1;
-                    if (jumpAt < 0) {
-                        if (t >= kStandTicks) return true;
-                    }
-                    else {
-                        if (held && t == 0) {
-                            input = 0;
-                            pressed = false;
-                        }
-                        if (t == jumpAt + (held ? 1 : 0)) {
-                            input = 1;
-                            pressed = true;
-                        }
-                        if (pressed && t == jumpAt + (held ? 1 : 0) + ibConfig().assumedHold) {
-                            input = 0;
-                            pressed = false;
-                        }
-                    }
-                    auto step = tick(runner, input, nullptr);
-                    if (step == Step::Dead) return false;
-                    if (step == Step::OutOfTime) return false;
-                    if (step == Step::Stop) return true;
-                    if (jumpAt >= 0 && t > jumpAt + ibConfig().assumedHold + 1 && grounded) return true;
-                }
-                return true;
-            };
-
-            bool ok = attempt(-1);
-            for (int j : kEscapeJumps) {
-                if (ok || timedOut) break;
-                ok = attempt(j);
+        // Undo what deeper planning levels left behind, so the next attempt starts clean.
+        void cleanDeeper(PlayerSim& ps, int depth) {
+            std::unordered_set<int> ids;
+            for (int d = 0; d < depth; ++d) {
+                ids.insert(ps.at(slotRunner(d))->m_uniqueID);
+                ids.insert(ps.at(slotSave(d))->m_uniqueID);
             }
-            quiet(runner);
-            return ok;
+            restoreFlags();
+            forgetActivations(layer, ids);
         }
 
-        // One player, one timing (delay), one continuation (branch).
-        Outcome runCandidate(PlayerSim& ps, int delay, int toggleAfter, std::vector<CCPoint>* path) {
+        // Ground modes: from `src`, can you keep going if you click like a player would?
+        // At every orb you overlap and every landing we try "click here" (up to `depth` more
+        // clicks deep). With no clicks left, reaching the next chance to click alive is enough.
+        bool canContinue(PlayerSim& ps, int depth, PlayerObject* src, bool srcHeld, bool startClick, std::vector<CCPoint>* path) {
+            auto runner = ps.at(slotRunner(depth));
+            auto save = ps.at(slotSave(depth));
+            copyState(runner, src, srcHeld);
+
+            std::vector<CCPoint> local;
+            auto* trace = path ? &local : nullptr;
+            auto succeed = [&](std::vector<CCPoint> const* tail) {
+                if (path) {
+                    path->insert(path->end(), local.begin(), local.end());
+                    if (tail) path->insert(path->end(), tail->begin(), tail->end());
+                }
+                quiet(runner);
+                return true;
+            };
+            auto tryClick = [&]() -> bool {
+                copyState(save, runner, false);
+                std::vector<CCPoint> child;
+                bool ok = canContinue(ps, depth - 1, save, false, true, path ? &child : nullptr);
+                cleanDeeper(ps, depth);
+                if (ok) return succeed(&child);
+                return false;
+            };
+
+            int clickEnd = startClick ? kClickHold : 0;
+            int groundStreak = 0;
+            int groundSince = -1;
+            std::vector<std::pair<RingObject*, int>> ringSeen;  // orb, tick of first touch
+
+            for (int t = 0; t <= kContinueHorizon; ++t) {
+                int input = -1;
+                if (t == 0) {
+                    if (startClick) input = 1;
+                    else if (srcHeld) input = 0;
+                }
+                if (startClick && t == kClickHold) input = 0;
+
+                auto step = tick(runner, input, trace);
+                if (step == Step::Dead || step == Step::OutOfTime) {
+                    quiet(runner);
+                    return false;
+                }
+                if (step == Step::Stop) return succeed(nullptr);
+                if (t <= clickEnd) {
+                    // The orb this click was for is not "the next click".
+                    if (g_ringTouched) ringSeen.emplace_back(g_ringTouched, -1);
+                    continue;
+                }
+
+                // Landed (two ticks in a row, so an orb flip touching a surface doesn't count).
+                groundStreak = grounded ? groundStreak + 1 : 0;
+                if (groundStreak >= 2) {
+                    if (groundSince < 0) groundSince = t;
+                    int onFor = t - groundSince;
+                    if (depth == 0) return succeed(nullptr);  // back on the ground, your click again
+                    if (onFor >= kStandTicks) return succeed(nullptr);
+                    if (std::find(std::begin(kGroundJumps), std::end(kGroundJumps), onFor) != std::end(kGroundJumps)) {
+                        if (tryClick()) return true;
+                        if (timedOut) return false;
+                    }
+                }
+                else if (!grounded) {
+                    groundSince = -1;
+                }
+
+                // Overlapping an orb: this is a chance to click.
+                auto ring = g_ringTouched;
+                if (ring && !runner->m_touchedRings.contains(ring->m_uniqueID)) {
+                    auto it = std::find_if(ringSeen.begin(), ringSeen.end(), [&](auto const& e) { return e.first == ring; });
+                    int since = 0;
+                    if (it == ringSeen.end()) ringSeen.emplace_back(ring, t);
+                    else if (it->second < 0) continue;  // ignored (already clicked)
+                    else since = t - it->second;
+                    if (since == 0 || since == kRingRetry) {
+                        if (depth == 0) return succeed(nullptr);  // reached the next click
+                        if (tryClick()) return true;
+                        if (timedOut) return false;
+                    }
+                }
+            }
+            return succeed(nullptr);
+        }
+
+        Outcome runGroundCandidate(PlayerSim& ps, int delay, std::vector<CCPoint>* path) {
             auto const& cfg = ibConfig();
             if (delay >= ps.baseValid) return Outcome::DiedEarly;  // dead before the input lands
+
+            auto runner = ps.at(kRunner);
+            copyState(runner, ps.at(delay), heldNow);
+            if (path) path->assign(ps.basePath.begin(), ps.basePath.begin() + std::min<size_t>(delay, ps.basePath.size()));
+
+            // Your input, then you keep it for the assumed hold.
+            Outcome result = Outcome::Survived;
+            bool settled = false;
+            for (int t = 0; t < cfg.assumedHold; ++t) {
+                auto step = tick(runner, t == 0 ? (down ? 1 : 0) : -1, path);
+                if (step == Step::Dead) {
+                    result = Outcome::DiedEarly;
+                    settled = true;
+                    break;
+                }
+                if (step == Step::OutOfTime) {
+                    result = Outcome::Unknown;
+                    settled = true;
+                    break;
+                }
+                if (step == Step::Stop) {
+                    settled = true;
+                    break;
+                }
+            }
+            if (!settled && !canContinue(ps, kMaxDepth, runner, down, false, path)) {
+                result = timedOut ? Outcome::Unknown : Outcome::Died;
+            }
+            quiet(runner);
+            restoreWorld(layer);
+            return result;
+        }
+
+        // Fly modes: one timing (delay), one continuation (toggle-back offset).
+        Outcome runFlyCandidate(PlayerSim& ps, int delay, int toggleAfter, std::vector<CCPoint>* path) {
+            auto const& cfg = ibConfig();
+            if (delay >= ps.baseValid) return Outcome::DiedEarly;
 
             auto runner = ps.at(kRunner);
             copyState(runner, ps.at(delay), heldNow);
@@ -278,17 +374,13 @@ namespace {
             int keepFor = cfg.assumedHold;
             int toggleAt = toggleAfter >= 0 ? keepFor + toggleAfter : -1;
             int settleStart = toggleAt >= 0 ? toggleAt : keepFor;
-            int maxT = settleStart + std::max(cfg.flyWindow, kGroundSettleMax);
-            bool held = down;
+            int maxT = settleStart + cfg.flyWindow;
 
             Outcome result = Outcome::Survived;
             for (int t = 0; t <= maxT; ++t) {
                 int input = -1;
                 if (t == 0) input = down ? 1 : 0;
-                if (t == toggleAt) {
-                    input = down ? 0 : 1;
-                    held = !down;
-                }
+                if (t == toggleAt) input = down ? 0 : 1;
 
                 auto step = tick(runner, input, path);
                 if (step == Step::OutOfTime) {
@@ -300,28 +392,20 @@ namespace {
                     break;
                 }
                 if (step == Step::Stop) break;
-
-                if (t >= settleStart) {
-                    if (isFlyMode(runner)) {
-                        if (t - settleStart >= cfg.flyWindow) break;
-                    }
-                    else if (t > settleStart && grounded) {
-                        // Landed. Only safe if you can still get out from here.
-                        if (!canEscape(ps, held)) result = timedOut ? Outcome::Unknown : Outcome::Died;
-                        break;
-                    }
-                }
             }
             quiet(runner);
             restoreWorld(layer);
             return result;
         }
 
-        // A continuation counts only if every moved player survives it (one key moves both in dual).
-        Outcome runShared(int delay, int toggleAfter, std::vector<CCPoint>* paths = nullptr) {
+        // A plan counts only if every moved player survives it (one key moves both in dual).
+        Outcome runShared(int delay, int branch, std::vector<CCPoint>* paths = nullptr) {
             Outcome worst = Outcome::Survived;
             for (size_t i = 0; i < players.size(); ++i) {
-                auto out = runCandidate(players[i], delay, toggleAfter, paths ? &paths[i] : nullptr);
+                auto* path = paths ? &paths[i] : nullptr;
+                auto out = flyMode()
+                    ? runFlyCandidate(players[i], delay, branch, path)
+                    : runGroundCandidate(players[i], delay, path);
                 if (out == Outcome::Died || out == Outcome::DiedEarly) return out;
                 if (out == Outcome::Unknown) worst = Outcome::Unknown;
             }
@@ -384,14 +468,16 @@ namespace {
             return pick > 0 ? pick : first;
         }
 
-        // Debug: record the first surviving continuation of this timing (or the first one if none).
+        // Debug: record the first surviving plan for this timing (or the first one if none).
         void record(int delay, std::vector<CCPoint>* paths) {
-            budget = std::max(budget, 4000);
+            budget = std::max(budget, 8000);
             timedOut = false;
             deadline = Clock::now() + std::chrono::milliseconds(50);
             for (int b : branches()) {
+                for (size_t i = 0; i < players.size(); ++i) paths[i].clear();
                 if (runShared(delay, b, paths) == Outcome::Survived) return;
             }
+            for (size_t i = 0; i < players.size(); ++i) paths[i].clear();
             runShared(delay, branches().front(), paths);
         }
     };
@@ -407,8 +493,8 @@ namespace sim {
 
     bool isFake(PlayerObject* player) {
         return player && std::any_of(std::begin(g_pools), std::end(g_pools), [&](auto const& pool) {
-                return std::any_of(pool.begin(), pool.end(), [&](auto const& p) { return p.data() == player; });
-            });
+            return std::any_of(pool.begin(), pool.end(), [&](auto const& p) { return p.data() == player; });
+        });
     }
 
     void setup(PlayLayer* layer) {
@@ -532,7 +618,10 @@ class $modify(IBSimGameLayer, GJBaseGameLayer) {
     }
 
     void playerTouchedRing(PlayerObject* player, RingObject* object) {
-        if (sim::active) remember(object);
+        if (sim::active) {
+            remember(object);
+            g_ringTouched = object;
+        }
         GJBaseGameLayer::playerTouchedRing(player, object);
     }
 
