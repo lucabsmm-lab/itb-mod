@@ -39,6 +39,7 @@ struct Channel {
     int lastShift = 0;
     bool held = false;      // what the game currently believes (after buffering)
     bool physical = false;  // what the player is actually pressing right now
+    int holdCheckTick = -100;  // last tick a held-into-landing jump was checked
 };
 
 struct BufferRuntime {

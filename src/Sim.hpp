@@ -37,6 +37,10 @@ namespace sim {
     // `players` are the real players that this input moves (two in one-key dual mode).
     Decision decide(GJBaseGameLayer* layer, std::vector<PlayerObject*> const& players, bool heldNow, bool down);
 
+    // True if a real (ground-mode) player that is in the air right now touches down within the
+    // next couple of ticks while the button stays held, i.e. GD is about to auto-jump.
+    bool landingSoon(GJBaseGameLayer* layer, std::vector<PlayerObject*> const& players);
+
     // Debug mode: green = predicted path with the chosen timing, red = as pressed.
     void drawDebug(Decision const& decision);
     void clearDebug();

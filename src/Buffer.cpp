@@ -146,6 +146,42 @@ namespace {
         }
     }
 
+    // Holding through a landing makes GD jump again the moment you touch down. That jump is not
+    // a click, so treat it like one: if it would doom you, let go for you and press again on the
+    // first tick that survives (you keep holding the real button the whole time).
+    void checkHeldLandings(GJBaseGameLayer* layer, PlayLayer* pl) {
+        if (!bufferingAllowed(pl)) return;
+        auto& rt = ibRuntime();
+        for (int i = 0; i < 2; ++i) {
+            auto& ch = rt.channels[i];
+            if (!ch.held || !ch.physical || !ch.queue.empty()) continue;
+            if (rt.tick - ch.holdCheckTick < 3) continue;  // one check per landing
+
+            auto players = movedPlayers(pl, i == 0);
+            if (players.empty() || !sim::landingSoon(layer, players)) continue;
+            ch.holdCheckTick = rt.tick;
+
+            // "Let go now, press again after N ticks"; N = 0 is the same as holding through.
+            auto decision = sim::decide(layer, players, false, true);
+            if (ibConfig().debug) {
+                log::info("[IB] holding into a landing (P{} key): auto-jump {} -> {}",
+                    i == 0 ? 1 : 2, decision.onTimeViable ? "survives" : "DOOMED",
+                    decision.onTimeViable || decision.shift == 0
+                        ? std::string("left alone")
+                        : fmt::format("let go and re-press in {} ticks", decision.shift));
+                sim::drawDebug(decision);
+                startDrift(decision, players, i);
+            }
+            if (decision.onTimeViable || decision.shift <= 0) continue;
+
+            fire(layer, ch, false, i == 0);
+            ch.queue.push_back({ true, rt.tick + decision.shift });
+            ch.lastShift = decision.shift;
+            rt.flashTimer = .35f;
+            rt.lastBufferedBy = decision.shift;
+        }
+    }
+
     // Safe mode: run progress-saving code as if this were a start-pos test run.
     struct SafeModeGuard {
         PlayLayer* layer;
@@ -245,7 +281,10 @@ class $modify(IBGameLayer, GJBaseGameLayer) {
     // point: they then move the player on exactly the tick the look-ahead simulated.
     void processQueuedButtons(float dt, bool clearInputQueue) {
         auto pl = PlayLayer::get();
-        if (pl && static_cast<GJBaseGameLayer*>(pl) == this) fireDue(this, "input queue");
+        if (pl && static_cast<GJBaseGameLayer*>(pl) == this) {
+            fireDue(this, "input queue");
+            checkHeldLandings(this, pl);
+        }
         GJBaseGameLayer::processQueuedButtons(dt, clearInputQueue);
     }
 };

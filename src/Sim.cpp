@@ -137,6 +137,10 @@ namespace {
         dst->m_slopeAngle = src->m_slopeAngle;
         dst->m_slopeStartTime = src->m_slopeStartTime;
         if (held) dst->pushButton(PlayerButton::Jump);
+        else if (auto it = src->m_holdingButtons.find(1); it != src->m_holdingButtons.end() && it->second) {
+            // Testing "what if you let go now" while the source is still holding.
+            dst->releaseButton(PlayerButton::Jump);
+        }
         // Holding is not the same as a fresh click: keep the source's buffered-jump state.
         dst->m_jumpBuffered = src->m_jumpBuffered;
         dst->m_stateRingJump = src->m_stateRingJump;
@@ -582,6 +586,35 @@ namespace sim {
         }
         result.ms = std::chrono::duration<double, std::milli>(Clock::now() - start).count();
         return result;
+    }
+
+    bool landingSoon(GJBaseGameLayer* layer, std::vector<PlayerObject*> const& players) {
+        constexpr int kLookTicks = 2;
+        bool soon = false;
+        bool playerDied = layer->m_playerDied;
+        {
+            ActiveGuard guard;
+            Evaluator ev { layer, {}, true, true, 64, Clock::now() + std::chrono::milliseconds(2) };
+            ev.dt = ibRuntime().lastDt;
+            for (auto real : players) {
+                if (!real || real->m_isDead || real->m_isOnGround || isFlyMode(real)) continue;
+                auto& pool = g_pools[real == layer->m_player2 ? 1 : 0];
+                if (static_cast<int>(pool.size()) != kPoolSize) continue;
+                RealSnapshot snap(real);
+                auto runner = pool[kRunner].data();
+                copyState(runner, real, true);
+                for (int t = 0; t < kLookTicks && !soon; ++t) {
+                    if (ev.tick(runner, -1, nullptr) != Step::Ok) break;
+                    if (ev.grounded) soon = true;
+                }
+                quiet(runner);
+                restoreWorld(layer);
+                snap.restoreIfChanged();
+                if (soon) break;
+            }
+        }
+        layer->m_playerDied = playerDied;
+        return soon;
     }
 
     void drawDebug(Decision const& decision) {
