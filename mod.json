@@ -5,7 +5,7 @@
 	},
 	"id": "lucabsmm-lab.input-buffer",
 	"name": "Input Buffer",
-	"version": "v1.0.0",
+	"version": "v1.0.1",
 	"developer": "lucabsmm-lab",
 	"description": "Buffers early clicks and releases by 2-16 ticks so they land on the first tick you survive.",
 	"dependencies": {
@@ -36,7 +36,10 @@
 			"description": "<cy>Safest</c>: picks the tick with the most room for error (path of least resistance).\n<cy>Earliest</c>: picks the first tick that survives (least added delay).",
 			"type": "string",
 			"default": "Safest",
-			"one-of": ["Safest", "Earliest"]
+			"one-of": [
+				"Safest",
+				"Earliest"
+			]
 		},
 		"safe-mode": {
 			"name": "Safe Mode",
@@ -54,7 +57,12 @@
 			"name": "Indicator Position",
 			"type": "string",
 			"default": "Top Left",
-			"one-of": ["Top Left", "Top Right", "Bottom Left", "Bottom Right"]
+			"one-of": [
+				"Top Left",
+				"Top Right",
+				"Bottom Left",
+				"Bottom Right"
+			]
 		},
 		"hotkeys": {
 			"name": "Hotkeys",
@@ -80,11 +88,25 @@
 		},
 		"sim-budget": {
 			"name": "Look-ahead Budget",
-			"description": "Maximum simulated ticks per input. Lower this if you notice stutters when an input gets buffered.",
+			"description": "Maximum simulated ticks per input.",
 			"type": "int",
-			"default": 12000,
+			"default": 6000,
 			"min": 1000,
 			"max": 60000
+		},
+		"time-limit": {
+			"name": "Look-ahead Time Limit (ms)",
+			"description": "Hard cap on how long one input may be looked at. Keeps the game from freezing; if the limit is hit the input simply happens normally.",
+			"type": "int",
+			"default": 8,
+			"min": 1,
+			"max": 30
+		},
+		"debug": {
+			"name": "Debug Mode",
+			"description": "Draws the predicted path (<cg>green</c> = chosen timing, <cr>red</c> = as pressed) and writes every decision, plus how far the real run drifted from the prediction, to the Geode log.",
+			"type": "bool",
+			"default": false
 		}
 	}
 }
