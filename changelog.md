@@ -1,3 +1,6 @@
+# v1.0.7
+- Holding through a landing: GD's automatic jump on touchdown is now buffered too. If it would doom you, the mod lets go for you and presses again on the first safe tick (you keep holding the real button).
+
 # v1.0.6
 - Fixed "show hitboxes on death" turning on while you were still alive (a hidden look-ahead cube dying set GD's death flag).
 - Every timing option is now simulated from your real cube instead of a saved copy, and copies keep their collision memory. Fixes held-back jumps right at a landing coming out 1 tick early.
