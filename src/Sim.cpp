@@ -31,6 +31,7 @@ namespace {
     bool g_dead = false;                 // a hidden player died this tick
     bool g_stop = false;                 // it hit something we don't simulate (portal, end, ...)
     RingObject* g_ringTouched = nullptr; // it overlapped this orb this tick
+    bool g_realDeath = false;            // a real player died this attempt
 
     // Activation flags of objects a hidden player touched, restored after every run.
     struct SavedFlags {
@@ -136,17 +137,32 @@ namespace {
         dst->m_currentSlope2 = src->m_currentSlope2;
         dst->m_slopeAngle = src->m_slopeAngle;
         dst->m_slopeStartTime = src->m_slopeStartTime;
+        // Testing "what if you let go now" while the source is still holding.
+        auto holding = src->m_holdingButtons.find(1);
+        bool letGo = !held && holding != src->m_holdingButtons.end() && holding->second;
         if (held) dst->pushButton(PlayerButton::Jump);
-        else if (auto it = src->m_holdingButtons.find(1); it != src->m_holdingButtons.end() && it->second) {
-            // Testing "what if you let go now" while the source is still holding.
-            dst->releaseButton(PlayerButton::Jump);
-        }
+        else if (letGo) dst->releaseButton(PlayerButton::Jump);
         // Holding is not the same as a fresh click: keep the source's buffered-jump state.
-        dst->m_jumpBuffered = src->m_jumpBuffered;
+        dst->m_jumpBuffered = src->m_jumpBuffered && !letGo;
         dst->m_stateRingJump = src->m_stateRingJump;
         dst->m_stateRingJump2 = src->m_stateRingJump2;
         dst->m_ringJumpRelated = src->m_ringJumpRelated;
     }
+
+    // GD's level-wide flags a hidden player can flip (dying sets "a player died", which turns on
+    // "show hitboxes on death"). Saved before every look-ahead and put back after it.
+    struct LayerFlags {
+        GJBaseGameLayer* layer;
+        bool playerDied;
+        bool debugDraw;
+
+        explicit LayerFlags(GJBaseGameLayer* l)
+          : layer(l), playerDied(l->m_playerDied), debugDraw(l->m_isDebugDrawEnabled) {}
+        ~LayerFlags() {
+            layer->m_playerDied = playerDied;
+            layer->m_isDebugDrawEnabled = debugDraw;
+        }
+    };
 
     void restoreFlags() {
         for (auto& [obj, flags] : g_touched) {
@@ -210,6 +226,8 @@ namespace {
             g_dead = false;
             g_stop = false;
             g_ringTouched = nullptr;
+            // Only orbs overlapped this tick can be clicked; the collision check re-adds them.
+            p->m_touchingRings->removeAllObjects();
             p->resetCollisionLog(false);
             layer->checkCollisions(p, dt, false);
             if (g_dead) return Step::Dead;
@@ -253,7 +271,8 @@ namespace {
         // Ground modes: from `src`, can you keep going if you click like a player would?
         // At every orb you overlap and every landing we try "click here" (up to `depth` more
         // clicks deep). With no clicks left, reaching the next chance to click alive is enough.
-        bool canContinue(PlayerSim& ps, int depth, PlayerObject* src, bool srcHeld, bool startClick, std::vector<CCPoint>* path, int waitTicks = 0) {
+        // `holdTicks`: how long the starting click is held (-1 = a planned tap).
+        bool canContinue(PlayerSim& ps, int depth, PlayerObject* src, bool srcHeld, bool startClick, std::vector<CCPoint>* path, int waitTicks = 0, int holdTicks = -1) {
             auto runner = ps.at(slotRunner(depth));
             auto save = ps.at(slotSave(depth));
             copyState(runner, src, srcHeld);
@@ -277,6 +296,8 @@ namespace {
                 return false;
             };
 
+            std::vector<std::pair<RingObject*, int>> ringSeen;  // orb, tick of first touch (-1 = not a new chance)
+
             // Held back: the button stays as it is for `waitTicks` first.
             for (int t = 0; t < waitTicks; ++t) {
                 auto step = tick(runner, -1, trace);
@@ -285,13 +306,14 @@ namespace {
                     return false;
                 }
                 if (step == Step::Stop) return succeed(nullptr);
+                // Orbs passed while waiting belong to this input, not to a later click.
+                if (g_ringTouched) ringSeen.emplace_back(g_ringTouched, -1);
             }
 
-            int hold = clickHold();
+            int hold = holdTicks >= 0 ? holdTicks : clickHold();
             int clickEnd = startClick ? hold : 0;
             int groundStreak = 0;
             int groundSince = -1;
-            std::vector<std::pair<RingObject*, int>> ringSeen;  // orb, tick of first touch
 
             for (int t = 0; t <= kContinueHorizon; ++t) {
                 int input = -1;
@@ -331,7 +353,7 @@ namespace {
 
                 // Overlapping an orb: this is a chance to click.
                 auto ring = g_ringTouched;
-                if (ring && !runner->m_touchedRings.contains(ring->m_uniqueID)) {
+                if (ring) {
                     auto it = std::find_if(ringSeen.begin(), ringSeen.end(), [&](auto const& e) { return e.first == ring; });
                     int since = 0;
                     if (it == ringSeen.end()) ringSeen.emplace_back(ring, t);
@@ -352,7 +374,10 @@ namespace {
         Outcome runGroundCandidate(PlayerSim& ps, int delay, std::vector<CCPoint>* path) {
             if (path) path->clear();
             Outcome result = Outcome::Survived;
-            if (!canContinue(ps, kMaxDepth, ps.real, heldNow, down, path, delay)) {
+            // Your press is held for the assumed hold: holding into an orb or a landing fires it,
+            // exactly like in the real game.
+            int hold = std::max(ibConfig().assumedHold, kTapHold);
+            if (!canContinue(ps, kMaxDepth, ps.real, heldNow, down, path, delay, hold)) {
                 result = timedOut ? Outcome::Unknown : Outcome::Died;
             }
             restoreWorld(layer);
@@ -541,9 +566,16 @@ namespace sim {
     }
 
     bool onDestroyPlayer(PlayerObject* player) {
-        if (!active || !isFake(player)) return false;
+        if (!active || !isFake(player)) {
+            if (!active) g_realDeath = true;
+            return false;
+        }
         g_dead = true;
         return true;
+    }
+
+    void onAttemptStart() {
+        g_realDeath = false;
     }
 
     Decision decide(GJBaseGameLayer* layer, std::vector<PlayerObject*> const& players, bool heldNow, bool down) {
@@ -562,10 +594,8 @@ namespace sim {
             snapshots.emplace_back(real);
         }
 
-        // A hidden player hitting a spike sets GD's "a player died" flag, which turns on
-        // "show hitboxes on death" even though you survived. Put it back afterwards.
-        bool playerDied = layer->m_playerDied;
         {
+            LayerFlags flags(layer);
             ActiveGuard guard;
 
             // On time and survivable: never touch it (keeps spam / straight-fly exactly normal).
@@ -580,7 +610,6 @@ namespace sim {
             }
         }
 
-        layer->m_playerDied = playerDied;
         for (auto const& snap : snapshots) {
             if (snap.restoreIfChanged()) result.realChanged = true;
         }
@@ -589,10 +618,11 @@ namespace sim {
     }
 
     bool landingSoon(GJBaseGameLayer* layer, std::vector<PlayerObject*> const& players) {
-        constexpr int kLookTicks = 2;
+        // A few ticks of warning: the auto-jump happens on the touchdown tick itself.
+        constexpr int kLookTicks = 4;
         bool soon = false;
-        bool playerDied = layer->m_playerDied;
         {
+            LayerFlags flags(layer);
             ActiveGuard guard;
             Evaluator ev { layer, {}, true, true, 64, Clock::now() + std::chrono::milliseconds(2) };
             ev.dt = ibRuntime().lastDt;
@@ -613,7 +643,6 @@ namespace sim {
                 if (soon) break;
             }
         }
-        layer->m_playerDied = playerDied;
         return soon;
     }
 
@@ -755,6 +784,17 @@ class $modify(IBSimGameLayer, GJBaseGameLayer) {
     void objectsCollided(int blockAID, int blockBID) {
         if (sim::active) return;
         GJBaseGameLayer::objectsCollided(blockAID, blockBID);
+    }
+
+    void updateDebugDraw() {
+        if (sim::active) return;
+        // Failsafe for "show hitboxes on death": if GD thinks a player died but neither real
+        // player is dead, that came from a hidden look-ahead player. Turn it back off.
+        if (auto pl = PlayLayer::get(); pl && static_cast<GJBaseGameLayer*>(pl) == this && m_playerDied && !g_realDeath) {
+            bool realDeath = (m_player1 && m_player1->m_isDead) || (m_player2 && m_player2->m_isDead);
+            if (!realDeath) m_playerDied = false;
+        }
+        GJBaseGameLayer::updateDebugDraw();
     }
 };
 

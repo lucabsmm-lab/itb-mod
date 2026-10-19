@@ -32,6 +32,8 @@ namespace sim {
     void teardown();
     // Returns true if the death belonged to a hidden player (and must not reach the game).
     bool onDestroyPlayer(PlayerObject* player);
+    // New attempt (level start / respawn).
+    void onAttemptStart();
 
     // Decide how many ticks to hold back an input that changes the button to `down`.
     // `players` are the real players that this input moves (two in one-key dual mode).

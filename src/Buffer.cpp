@@ -175,6 +175,8 @@ namespace {
             if (decision.onTimeViable || decision.shift <= 0) continue;
 
             fire(layer, ch, false, i == 0);
+            // Letting go must also cancel a buffered jump, or GD still jumps on touchdown.
+            for (auto p : players) p->m_jumpBuffered = false;
             ch.queue.push_back({ true, rt.tick + decision.shift });
             ch.lastShift = decision.shift;
             rt.flashTimer = .35f;
@@ -303,6 +305,7 @@ class $modify(IBPlayLayer, PlayLayer) {
         if (!PlayLayer::init(level, useReplay, dontCreateObjects)) return false;
 
         sim::setup(this);
+        sim::onAttemptStart();
         ui::addIndicator(this);
         announceState(false);
         return true;
@@ -313,6 +316,7 @@ class $modify(IBPlayLayer, PlayLayer) {
         sim::clearDebug();
         settleChannels(this);
         PlayLayer::resetLevel();
+        sim::onAttemptStart();
         ibRuntime().usedThisAttempt = ibConfig().enabled;
     }
 
