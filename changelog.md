@@ -1,3 +1,10 @@
+# v1.0.8
+- Orbs: the look-ahead now really plans clicking the next orb (it was skipping every orb it touched, so orb chains never got planned).
+- Your press is treated as a hold, like in the real game: holding into an orb fires it, so clicking early into the wrong orb (e.g. the green one before the blue one) is caught and held back.
+- Only orbs you are touching on the current tick can be clicked in the look-ahead (matches GD).
+- Show hitboxes on death: GD's hitbox drawing is blocked during a look-ahead, its level flags are restored after every look-ahead, and a failsafe turns hitboxes back off if GD thinks a player died when no real player did.
+- Holding into a landing: the touchdown is detected a few ticks earlier, and letting go also cancels GD's buffered jump.
+
 # v1.0.7
 - Holding through a landing: GD's automatic jump on touchdown is now buffered too. If it would doom you, the mod lets go for you and presses again on the first safe tick (you keep holding the real button).
 

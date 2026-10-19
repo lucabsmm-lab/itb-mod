@@ -5,7 +5,7 @@
 	},
 	"id": "lucabsmm-lab.input-buffer",
 	"name": "Input Buffer",
-	"version": "v1.0.7",
+	"version": "v1.0.8",
 	"developer": "lucabsmm-lab",
 	"description": "Buffers early clicks and releases by 2-16 ticks so they land on the first tick you survive.",
 	"dependencies": {
