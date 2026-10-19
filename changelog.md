@@ -1,3 +1,9 @@
+# v1.0.5
+- Held-back inputs are now handed to the game at the same point GD processes real clicks (they could land 1 tick off, which is exactly the doomed timing).
+- Cube / ball / spider: your click is treated as a tap, so the next orb can be planned right away (dense orb chains no longer look like dead ends). Robot keeps the assumed hold.
+- Plans up to 3 follow-up clicks deep, and tries 3 click timings per orb.
+- Debug: drift check now says whether a held-back input landed on time, 1 tick early or 1 tick late, and logs where it was released.
+
 # v1.0.4
 - Cube / ball / robot / spider: the look-ahead now plans your next clicks like a player would. At every orb you pass and every landing it tries clicking there, up to 2 clicks deep; reaching your next chance to click alive counts as safe. Orb chains no longer look like dead ends.
 - A one-tick surface touch (e.g. during an orb flip) no longer counts as a landing.
