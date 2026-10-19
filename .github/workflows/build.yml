@@ -1,0 +1,34 @@
+name: Build Geode Mod
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "**"
+
+jobs:
+  build:
+    name: Build (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build the mod
+        uses: geode-sdk/build-geode-mod@main
+        with:
+          sdk: given
+          combine: true
+          target: Win64
+
+  package:
+    name: Package
+    runs-on: ubuntu-latest
+    needs: ['build']
+    steps:
+      - uses: geode-sdk/build-geode-mod/combine@main
+        id: build
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Build Output
+          path: ${{ steps.build.outputs.build-output }}
