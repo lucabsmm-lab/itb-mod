@@ -164,6 +164,9 @@ namespace {
         int steps = 0;
         bool timedOut = false;
         float dt = .25f;
+        // GD only marks "on ground" while checking collisions (movement clears it again), so
+        // landings must be read right after the collision check of each tick.
+        bool grounded = false;
 
         bool outOfTime() {
             if (budget <= 0) timedOut = true;
@@ -182,6 +185,7 @@ namespace {
             layer->checkCollisions(p, dt, false);
             if (g_dead) return Step::Dead;
             if (g_stop) return Step::Stop;
+            grounded = p->m_isOnGround;
             if (input >= 0) setButton(p, input == 1);
             p->update(dt);
             p->updateSpecial(dt);
@@ -243,12 +247,12 @@ namespace {
                             input = 0;
                             pressed = false;
                         }
-                        if (t > jumpAt + ibConfig().assumedHold + 1 && runner->m_isOnGround) return true;
                     }
                     auto step = tick(runner, input, nullptr);
                     if (step == Step::Dead) return false;
                     if (step == Step::OutOfTime) return false;
                     if (step == Step::Stop) return true;
+                    if (jumpAt >= 0 && t > jumpAt + ibConfig().assumedHold + 1 && grounded) return true;
                 }
                 return true;
             };
@@ -301,7 +305,7 @@ namespace {
                     if (isFlyMode(runner)) {
                         if (t - settleStart >= cfg.flyWindow) break;
                     }
-                    else if (t > settleStart && runner->m_isOnGround) {
+                    else if (t > settleStart && grounded) {
                         // Landed. Only safe if you can still get out from here.
                         if (!canEscape(ps, held)) result = timedOut ? Outcome::Unknown : Outcome::Died;
                         break;
@@ -502,6 +506,8 @@ namespace sim {
             }
         };
         for (auto const& path : decision.onTime) line(path, { 1.f, .2f, .2f, 1.f });
+        // Doomed with nothing in range to save it: the red line is the whole story.
+        if (!decision.onTimeViable && decision.shift == 0) return;
         for (auto const& path : decision.predicted) line(path, { .2f, 1.f, .3f, 1.f });
     }
 
