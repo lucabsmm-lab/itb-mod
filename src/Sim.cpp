@@ -71,7 +71,33 @@ namespace {
         else p->releaseButton(PlayerButton::Jump);
     }
 
-    // The bits of a real player we check after simulating, to catch any leak into the real game.
+    // 0 cube, 1 ship, 2 ball, 3 UFO, 4 wave, 5 robot, 6 spider, 7 swing
+    int modeOf(PlayerObject* p) {
+        if (p->m_isShip) return 1;
+        if (p->m_isBall) return 2;
+        if (p->m_isBird) return 3;
+        if (p->m_isDart) return 4;
+        if (p->m_isRobot) return 5;
+        if (p->m_isSpider) return 6;
+        if (p->m_isSwing) return 7;
+        return 0;
+    }
+
+    void setMode(PlayerObject* p, int mode, bool enable) {
+        switch (mode) {
+            case 1: p->toggleFlyMode(enable, true); break;
+            case 2: p->toggleRollMode(enable, true); break;
+            case 3: p->toggleBirdMode(enable, true); break;
+            case 4: p->toggleDartMode(enable, true); break;
+            case 5: p->toggleRobotMode(enable, true); break;
+            case 6: p->toggleSpiderMode(enable, true); break;
+            case 7: p->toggleSwingMode(enable, true); break;
+            default: break;
+        }
+    }
+
+    // The bits of a real player we check after simulating, to catch any leak into the real game
+    // (in dual mode GD switches both players at a portal, so a hidden player could flip yours).
     struct RealSnapshot {
         PlayerObject* player;
         CCPoint pos;
@@ -79,22 +105,43 @@ namespace {
         bool onGround;
         bool upsideDown;
         bool dead;
+        int mode;
+        float size;
+        float speed;
 
         explicit RealSnapshot(PlayerObject* p)
           : player(p), pos(p->getPosition()), yVel(p->m_yVelocity),
-            onGround(p->m_isOnGround), upsideDown(p->m_isUpsideDown), dead(p->m_isDead) {}
+            onGround(p->m_isOnGround), upsideDown(p->m_isUpsideDown), dead(p->m_isDead),
+            mode(modeOf(p)), size(p->m_vehicleSize), speed(p->m_playerSpeed) {}
 
-        // Puts the player back if anything moved. Returns true if it had to.
+        // Puts the player back if anything changed. Returns true if it had to.
         bool restoreIfChanged() const {
+            bool changed = false;
+            if (modeOf(player) != mode) {
+                setMode(player, modeOf(player), false);
+                setMode(player, mode, true);
+                changed = true;
+            }
+            if (player->m_vehicleSize != size) {
+                player->togglePlayerScale(size < 1.f, true);
+                changed = true;
+            }
+            if (player->m_isUpsideDown != upsideDown) {
+                player->flipGravity(upsideDown, true);
+                changed = true;
+            }
+            if (player->m_playerSpeed != speed) {
+                player->m_playerSpeed = speed;
+                changed = true;
+            }
             auto now = player->getPosition();
-            bool changed = now.x != pos.x || now.y != pos.y || player->m_yVelocity != yVel
-                || player->m_isOnGround != onGround || player->m_isUpsideDown != upsideDown
-                || player->m_isDead != dead;
-            if (changed) {
+            if (now.x != pos.x || now.y != pos.y || player->m_yVelocity != yVel
+                || player->m_isOnGround != onGround || player->m_isDead != dead) {
                 player->setPosition(pos);
                 player->m_yVelocity = yVel;
                 player->m_isOnGround = onGround;
                 player->m_isDead = dead;
+                changed = true;
             }
             return changed;
         }
@@ -149,18 +196,59 @@ namespace {
         dst->m_ringJumpRelated = src->m_ringJumpRelated;
     }
 
-    // GD's level-wide flags a hidden player can flip (dying sets "a player died", which turns on
-    // "show hitboxes on death"). Saved before every look-ahead and put back after it.
-    struct LayerFlags {
+    // Everything level-wide a hidden player can change: portals move GD's camera and portal
+    // bounds (kept in m_gameState), dying sets "a player died" (which turns on "show hitboxes on
+    // death"). Saved before every look-ahead and put back after it, so hidden players can go
+    // through portals without the real level noticing.
+    struct WorldSnapshot;
+    WorldSnapshot* g_world = nullptr;
+    bool g_worldDirty = false;  // a hidden player went through a portal since the last restore
+
+    struct WorldSnapshot {
         GJBaseGameLayer* layer;
+        GJGameState state;
         bool playerDied;
         bool debugDraw;
+        float cameraFlip;
+        float cameraWidthOffset;
+        float cameraHeightOffset;
+        float cameraUnzoomedHeightOffset;
+        float targetCameraHeightOffset;
+        bool calculateTargetHeightOffset;
+        GameObject* p1Block;
+        GameObject* p2Block;
+        WorldSnapshot* previous;
 
-        explicit LayerFlags(GJBaseGameLayer* l)
-          : layer(l), playerDied(l->m_playerDied), debugDraw(l->m_isDebugDrawEnabled) {}
-        ~LayerFlags() {
+        explicit WorldSnapshot(GJBaseGameLayer* l)
+          : layer(l), state(l->m_gameState), playerDied(l->m_playerDied), debugDraw(l->m_isDebugDrawEnabled),
+            cameraFlip(l->m_cameraFlip), cameraWidthOffset(l->m_cameraWidthOffset),
+            cameraHeightOffset(l->m_cameraHeightOffset), cameraUnzoomedHeightOffset(l->m_cameraUnzoomedHeightOffset),
+            targetCameraHeightOffset(l->m_targetCameraHeightOffset),
+            calculateTargetHeightOffset(l->m_calculateTargetHeightOffset),
+            p1Block(l->m_player1CollisionBlock), p2Block(l->m_player2CollisionBlock), previous(g_world) {
+            g_world = this;
+        }
+
+        void restore() {
+            if (g_worldDirty) {
+                layer->m_gameState = state;
+                g_worldDirty = false;
+            }
             layer->m_playerDied = playerDied;
             layer->m_isDebugDrawEnabled = debugDraw;
+            layer->m_cameraFlip = cameraFlip;
+            layer->m_cameraWidthOffset = cameraWidthOffset;
+            layer->m_cameraHeightOffset = cameraHeightOffset;
+            layer->m_cameraUnzoomedHeightOffset = cameraUnzoomedHeightOffset;
+            layer->m_targetCameraHeightOffset = targetCameraHeightOffset;
+            layer->m_calculateTargetHeightOffset = calculateTargetHeightOffset;
+            layer->m_player1CollisionBlock = p1Block;
+            layer->m_player2CollisionBlock = p2Block;
+        }
+
+        ~WorldSnapshot() {
+            restore();
+            g_world = previous;
         }
     };
 
@@ -183,6 +271,7 @@ namespace {
 
     void restoreWorld(GJBaseGameLayer* layer) {
         restoreFlags();
+        if (g_world) g_world->restore();
         forgetActivations(layer, g_poolIDs);
     }
 
@@ -595,7 +684,7 @@ namespace sim {
         }
 
         {
-            LayerFlags flags(layer);
+            WorldSnapshot world(layer);
             ActiveGuard guard;
 
             // On time and survivable: never touch it (keeps spam / straight-fly exactly normal).
@@ -622,7 +711,7 @@ namespace sim {
         constexpr int kLookTicks = 4;
         bool soon = false;
         {
-            LayerFlags flags(layer);
+            WorldSnapshot world(layer);
             ActiveGuard guard;
             Evaluator ev { layer, {}, true, true, 64, Clock::now() + std::chrono::milliseconds(2) };
             ev.dt = ibRuntime().lastDt;
@@ -669,7 +758,15 @@ namespace sim {
 // Side-effect guards while simulating
 // ---------------------------------------------------------------------------
 
+// All guards run before any other mod's hooks, so other mods (Mega Hack, hitbox / death
+// features, ...) never see the hidden look-ahead players or their deaths.
+#define IB_RUN_FIRST \
+    static void onModify(auto& self) { \
+        for (auto hook : self.getAllHooks()) hook->setPriority(Priority::First); \
+    }
+
 class $modify(IBSimGameLayer, GJBaseGameLayer) {
+    IB_RUN_FIRST
     bool canBeActivatedByPlayer(PlayerObject* player, EffectGameObject* object) {
         if (sim::active) remember(object);
         return GJBaseGameLayer::canBeActivatedByPlayer(player, object);
@@ -701,32 +798,45 @@ class $modify(IBSimGameLayer, GJBaseGameLayer) {
         GJBaseGameLayer::flipGravity(player, flip, noEffects);
     }
 
-    // Gamemode / dual / mirror / teleport portals change level-wide state (camera, ground).
-    // We don't simulate past them: the branch ends there as "survived".
-    void playerWillSwitchMode(PlayerObject* player, GameObject* object) {
-        if (sim::active) {
+    // Gamemode and teleport portals: the hidden player goes through them for real; what they
+    // change level-wide (camera, portal bounds) is rolled back after the look-ahead.
+    // In dual mode GD switches both players at a portal, so there we stop instead.
+    bool portalAllowed() {
+        if (!sim::active) return true;
+        if (m_gameState.m_isDualMode) {
             g_stop = true;
-            return;
+            return false;
         }
+        g_worldDirty = true;
+        return true;
+    }
+
+    void playerWillSwitchMode(PlayerObject* player, GameObject* object) {
+        if (!portalAllowed()) return;
         GJBaseGameLayer::playerWillSwitchMode(player, object);
     }
 
     void switchToRobotMode(PlayerObject* player, GameObject* object, bool noPortal) {
-        if (sim::active) {
-            g_stop = true;
-            return;
-        }
+        if (!portalAllowed()) return;
         GJBaseGameLayer::switchToRobotMode(player, object, noPortal);
     }
 
     void switchToRollMode(PlayerObject* player, GameObject* object, bool noPortal) {
-        if (sim::active) {
-            g_stop = true;
-            return;
-        }
+        if (!portalAllowed()) return;
         GJBaseGameLayer::switchToRollMode(player, object, noPortal);
     }
 
+    void switchToSpiderMode(PlayerObject* player, GameObject* object, bool noPortal) {
+        if (!portalAllowed()) return;
+        GJBaseGameLayer::switchToSpiderMode(player, object, noPortal);
+    }
+
+    void teleportPlayer(TeleportPortalObject* object, PlayerObject* player) {
+        if (!portalAllowed()) return;
+        GJBaseGameLayer::teleportPlayer(object, player);
+    }
+
+    // Would add or remove the real second player: never simulated.
     void toggleDualMode(GameObject* object, bool dual, PlayerObject* player, bool noEffects) {
         if (sim::active) {
             g_stop = true;
@@ -735,25 +845,40 @@ class $modify(IBSimGameLayer, GJBaseGameLayer) {
         GJBaseGameLayer::toggleDualMode(object, dual, player, noEffects);
     }
 
-    void teleportPlayer(TeleportPortalObject* object, PlayerObject* player) {
-        if (sim::active) {
-            g_stop = true;
-            return;
-        }
-        GJBaseGameLayer::teleportPlayer(object, player);
-    }
-
+    // Purely visual for the level (mirror, ground animations, camera shake, particles).
     void toggleFlipped(bool flip, bool noEffects) {
-        if (sim::active) {
-            g_stop = true;
-            return;
-        }
+        if (sim::active) return;
         GJBaseGameLayer::toggleFlipped(flip, noEffects);
     }
 
     void updateDualGround(PlayerObject* player, int mode, bool instant, float duration) {
         if (sim::active) return;
         GJBaseGameLayer::updateDualGround(player, mode, instant, duration);
+    }
+
+    void animateInDualGroundNew(GameObject* object, float height, bool instant, float duration) {
+        if (sim::active) return;
+        GJBaseGameLayer::animateInDualGroundNew(object, height, instant, duration);
+    }
+
+    void playExitDualEffect(PlayerObject* player) {
+        if (sim::active) return;
+        GJBaseGameLayer::playExitDualEffect(player);
+    }
+
+    void checkCameraLimitAfterTeleport(PlayerObject* player, float yOffset) {
+        if (sim::active) return;
+        GJBaseGameLayer::checkCameraLimitAfterTeleport(player, yOffset);
+    }
+
+    void shakeCamera(float duration, float strength, float interval) {
+        if (sim::active) return;
+        GJBaseGameLayer::shakeCamera(duration, strength, interval);
+    }
+
+    void spawnParticleTrigger(int particleID, cocos2d::CCPoint position, float rotation, float scale) {
+        if (sim::active) return;
+        GJBaseGameLayer::spawnParticleTrigger(particleID, position, rotation, scale);
     }
 
     void gameEventTriggered(GJGameEvent event, int material, int playerID) {
@@ -799,6 +924,7 @@ class $modify(IBSimGameLayer, GJBaseGameLayer) {
 };
 
 class $modify(IBSimPlayer, PlayerObject) {
+    IB_RUN_FIRST
     void update(float dt) {
         if (!sim::active) {
             if (auto pl = PlayLayer::get(); pl && (this == pl->m_player1 || this == pl->m_player2)) {
@@ -820,6 +946,7 @@ class $modify(IBSimPlayer, PlayerObject) {
 };
 
 class $modify(IBSimObject, GameObject) {
+    IB_RUN_FIRST
     void playShineEffect() {
         if (sim::active) return;
         GameObject::playShineEffect();
@@ -827,6 +954,7 @@ class $modify(IBSimObject, GameObject) {
 };
 
 class $modify(IBSimStreak, HardStreak) {
+    IB_RUN_FIRST
     void addPoint(cocos2d::CCPoint point) {
         if (sim::active) return;
         HardStreak::addPoint(point);

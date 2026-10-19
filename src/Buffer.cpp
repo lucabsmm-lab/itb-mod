@@ -292,6 +292,14 @@ class $modify(IBGameLayer, GJBaseGameLayer) {
 };
 
 class $modify(IBPlayLayer, PlayLayer) {
+    // Hidden look-ahead players must be caught here before any other mod sees them "die".
+    static void onModify(auto& self) {
+        for (auto name : { "PlayLayer::destroyPlayer", "PlayLayer::levelComplete",
+                           "PlayLayer::playEndAnimationToPos", "PlayLayer::checkpointActivated" }) {
+            (void)self.setHookPriority(name, Priority::First);
+        }
+    }
+
     bool init(GJGameLevel* level, bool useReplay, bool dontCreateObjects) {
         auto& rt = ibRuntime();
         rt.clearQueues();
