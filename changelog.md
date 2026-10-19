@@ -1,3 +1,9 @@
+# v1.0.9
+- The mod's look-ahead guards now run before every other mod's hooks (e.g. Mega Hack), so other mods never see the hidden look-ahead players or their deaths. Fixes look-ahead deaths going unnoticed (a deadly jump shown as safe) and other mods' hitbox / death features firing while you are alive.
+- The look-ahead now goes through gamemode, teleport, gravity, speed and size portals instead of stopping at them. Level-wide changes (camera, portal bounds) are saved before and restored after every look-ahead; ground / dual animations, mirror effects, camera shake and particle triggers are blocked during it.
+- Dual mode: gamemode portals still end the look-ahead (GD switches both players there).
+- Safety net: if a real player's gamemode, gravity, size or speed changes during a look-ahead, it is put back.
+
 # v1.0.8
 - Orbs: the look-ahead now really plans clicking the next orb (it was skipping every orb it touched, so orb chains never got planned).
 - Your press is treated as a hold, like in the real game: holding into an orb fires it, so clicking early into the wrong orb (e.g. the green one before the blue one) is caught and held back.
