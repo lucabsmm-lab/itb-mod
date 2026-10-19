@@ -5,7 +5,7 @@
 	},
 	"id": "lucabsmm-lab.input-buffer",
 	"name": "Input Buffer",
-	"version": "v1.0.3",
+	"version": "v1.0.4",
 	"developer": "lucabsmm-lab",
 	"description": "Buffers early clicks and releases by 2-16 ticks so they land on the first tick you survive.",
 	"dependencies": {
@@ -80,7 +80,7 @@
 		},
 		"fly-window": {
 			"name": "Fly Survive Window (ticks)",
-			"description": "Ship / UFO / wave / swing: how many ticks you must survive after your next input for a timing to count as safe. Cube / ball / robot / spider instead check until you land.",
+			"description": "Ship / UFO / wave / swing: how many ticks you must survive after your next input for a timing to count as safe. Cube / ball / robot / spider instead plan your next clicks at orbs and landings.",
 			"type": "int",
 			"default": 30,
 			"min": 4,

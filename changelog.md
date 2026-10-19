@@ -1,3 +1,8 @@
+# v1.0.4
+- Cube / ball / robot / spider: the look-ahead now plans your next clicks like a player would. At every orb you pass and every landing it tries clicking there, up to 2 clicks deep; reaching your next chance to click alive counts as safe. Orb chains no longer look like dead ends.
+- A one-tick surface touch (e.g. during an orb flip) no longer counts as a landing.
+- Debug: the green line now includes the planned follow-up clicks.
+
 # v1.0.3
 - Fixed landings not being detected in the look-ahead (it thought every jump never landed, so almost every input looked doomed and nothing got buffered).
 - Debug: a doomed input that nothing can save now shows only the red line.
