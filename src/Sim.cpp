@@ -16,7 +16,7 @@ namespace {
 
     constexpr int kMaxShift = 16;
     // Future clicks the look-ahead may plan after your input (at orbs and on the ground).
-    constexpr int kMaxDepth = 2;
+    constexpr int kMaxDepth = 3;
 
     // Hidden players per real player: one saved state per tick of the "do nothing" path
     // (0..kMaxShift), the candidate runner, then a runner + save per planning depth.
@@ -55,10 +55,10 @@ namespace {
     // Ground modes (cube / ball / robot / spider) plan future clicks instead.
     constexpr int kGroundPlan[] = { 0 };
 
-    constexpr int kClickHold = 4;          // a planned click is held this long
+    constexpr int kTapHold = 4;            // a tap is held this long (robot uses the assumed hold)
     constexpr int kStandTicks = 20;        // standing this long on ground = fine
     constexpr int kGroundJumps[] = { 0, 4, 8, 12 };  // planned jumps after landing (ticks on ground)
-    constexpr int kRingRetry = 3;          // second planned click on the same orb, ticks later
+    constexpr int kRingClicks[] = { 0, 3, 6 };  // planned clicks on an orb, ticks after first touching it
     constexpr int kContinueHorizon = 180;  // surviving this long without dying = fine
     constexpr int kSafestSpan = 4;         // Safest mode looks this many ticks past the first safe one
 
@@ -208,6 +208,12 @@ namespace {
             return isFlyMode(players.front().real);
         }
 
+        // How long a click is held: robot jumps higher the longer you hold, the rest only care
+        // that you clicked.
+        int clickHold() const {
+            return players.front().real->m_isRobot ? ibConfig().assumedHold : kTapHold;
+        }
+
         std::span<int const> branches() const {
             if (!flyMode()) return kGroundPlan;
             if (down) return kPressFly;
@@ -267,7 +273,8 @@ namespace {
                 return false;
             };
 
-            int clickEnd = startClick ? kClickHold : 0;
+            int hold = clickHold();
+            int clickEnd = startClick ? hold : 0;
             int groundStreak = 0;
             int groundSince = -1;
             std::vector<std::pair<RingObject*, int>> ringSeen;  // orb, tick of first touch
@@ -278,7 +285,7 @@ namespace {
                     if (startClick) input = 1;
                     else if (srcHeld) input = 0;
                 }
-                if (startClick && t == kClickHold) input = 0;
+                if (startClick && t == hold) input = 0;
 
                 auto step = tick(runner, input, trace);
                 if (step == Step::Dead || step == Step::OutOfTime) {
@@ -316,7 +323,7 @@ namespace {
                     if (it == ringSeen.end()) ringSeen.emplace_back(ring, t);
                     else if (it->second < 0) continue;  // ignored (already clicked)
                     else since = t - it->second;
-                    if (since == 0 || since == kRingRetry) {
+                    if (std::find(std::begin(kRingClicks), std::end(kRingClicks), since) != std::end(kRingClicks)) {
                         if (depth == 0) return succeed(nullptr);  // reached the next click
                         if (tryClick()) return true;
                         if (timedOut) return false;
@@ -326,38 +333,16 @@ namespace {
             return succeed(nullptr);
         }
 
+        // Ground modes: your input is the first click of the plan, so the next orb or landing can
+        // be planned for straight away (dense orb chains don't leave a 12-tick gap).
         Outcome runGroundCandidate(PlayerSim& ps, int delay, std::vector<CCPoint>* path) {
-            auto const& cfg = ibConfig();
             if (delay >= ps.baseValid) return Outcome::DiedEarly;  // dead before the input lands
-
-            auto runner = ps.at(kRunner);
-            copyState(runner, ps.at(delay), heldNow);
             if (path) path->assign(ps.basePath.begin(), ps.basePath.begin() + std::min<size_t>(delay, ps.basePath.size()));
 
-            // Your input, then you keep it for the assumed hold.
             Outcome result = Outcome::Survived;
-            bool settled = false;
-            for (int t = 0; t < cfg.assumedHold; ++t) {
-                auto step = tick(runner, t == 0 ? (down ? 1 : 0) : -1, path);
-                if (step == Step::Dead) {
-                    result = Outcome::DiedEarly;
-                    settled = true;
-                    break;
-                }
-                if (step == Step::OutOfTime) {
-                    result = Outcome::Unknown;
-                    settled = true;
-                    break;
-                }
-                if (step == Step::Stop) {
-                    settled = true;
-                    break;
-                }
-            }
-            if (!settled && !canContinue(ps, kMaxDepth, runner, down, false, path)) {
+            if (!canContinue(ps, kMaxDepth, ps.at(delay), heldNow, down, path)) {
                 result = timedOut ? Outcome::Unknown : Outcome::Died;
             }
-            quiet(runner);
             restoreWorld(layer);
             return result;
         }

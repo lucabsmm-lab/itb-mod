@@ -22,7 +22,7 @@ namespace {
         int length = 0;
         std::vector<PlayerObject*> players;
         std::vector<CCPoint> predicted[2];
-        float maxErr = 0.f;
+        float maxErr[3] = { 0.f, 0.f, 0.f };  // real vs predicted one tick behind / same / ahead
         int firstBad = -1;
         int compared = 0;
     };
@@ -31,9 +31,13 @@ namespace {
     void finishDrift(char const* why) {
         if (!g_drift.active) return;
         g_drift.active = false;
+        auto const& e = g_drift.maxErr;
+        char const* verdict = "on time";
+        if (e[1] > 2.f && e[0] < e[1] && e[0] <= e[2]) verdict = "LANDED 1 TICK LATE";
+        else if (e[1] > 2.f && e[2] < e[1] && e[2] < e[0]) verdict = "LANDED 1 TICK EARLY";
         log::info(
-            "[IB] drift check ended ({}): {} ticks compared | max error {:.2f} units (first tick off by more than 2: {})",
-            why, g_drift.compared, g_drift.maxErr, g_drift.firstBad
+            "[IB] drift check ended ({}): {} ticks compared | max error {:.2f} units (first tick off by more than 2: {}) | if 1 tick late {:.2f}, if 1 tick early {:.2f} -> {}",
+            why, g_drift.compared, e[1], g_drift.firstBad, e[0], e[2], verdict
         );
     }
 
@@ -57,9 +61,12 @@ namespace {
             auto const& path = g_drift.predicted[p];
             if (index >= static_cast<int>(path.size())) continue;
             auto real = g_drift.players[p]->getPosition();
-            float err = std::hypot(real.x - path[index].x, real.y - path[index].y);
-            g_drift.maxErr = std::max(g_drift.maxErr, err);
-            if (err > 2.f && g_drift.firstBad < 0) g_drift.firstBad = index;
+            for (int o = -1; o <= 1; ++o) {
+                int i = std::clamp(index + o, 0, static_cast<int>(path.size()) - 1);
+                float err = std::hypot(real.x - path[i].x, real.y - path[i].y);
+                g_drift.maxErr[o + 1] = std::max(g_drift.maxErr[o + 1], err);
+                if (o == 0 && err > 2.f && g_drift.firstBad < 0) g_drift.firstBad = index;
+            }
         }
         g_drift.compared = index + 1;
         if (index >= g_drift.length) finishDrift("covered delay + assumed hold");
@@ -80,6 +87,24 @@ namespace {
         layer->handleButton(down, static_cast<int>(PlayerButton::Jump), isPlayer1);
         g_bypass = false;
         ch.held = down;
+    }
+
+    // Releases held-back inputs whose tick has come. `where` is only for the debug log.
+    void fireDue(GJBaseGameLayer* layer, char const* where) {
+        auto& rt = ibRuntime();
+        for (int i = 0; i < 2; ++i) {
+            auto& ch = rt.channels[i];
+            while (!ch.queue.empty() && ch.queue.front().fireTick <= rt.tick) {
+                auto input = ch.queue.front();
+                ch.queue.pop_front();
+                if (ibConfig().debug) {
+                    log::info("[IB] released held-back {} at tick {} (due {}) via {}",
+                        input.down ? "press" : "release", rt.tick, input.fireTick, where);
+                }
+                fire(layer, ch, input.down, i == 0);
+            }
+            if (ch.queue.empty()) ch.lastShift = 0;
+        }
     }
 
     void flush(GJBaseGameLayer* layer, Channel& ch, bool isPlayer1) {
@@ -209,20 +234,19 @@ class $modify(IBGameLayer, GJBaseGameLayer) {
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
 
         if (ours) {
-            // Release held-back inputs at the end of their tick: that is the same point a
-            // normal click lands, so it moves the player from the next tick on (as simulated).
-            auto& rt = ibRuntime();
-            for (int i = 0; i < 2; ++i) {
-                auto& ch = rt.channels[i];
-                while (!ch.queue.empty() && ch.queue.front().fireTick <= rt.tick) {
-                    auto input = ch.queue.front();
-                    ch.queue.pop_front();
-                    fire(this, ch, input.down, i == 0);
-                }
-                if (ch.queue.empty()) ch.lastShift = 0;
-            }
+            // Normally already released inside processQueuedButtons; this only catches a
+            // tick where GD skipped that step.
+            fireDue(this, "end of tick (fallback)");
             stepDrift();
         }
+    }
+
+    // GD hands real clicks to handleButton from here, so held-back inputs go in at the same
+    // point: they then move the player on exactly the tick the look-ahead simulated.
+    void processQueuedButtons(float dt, bool clearInputQueue) {
+        auto pl = PlayLayer::get();
+        if (pl && static_cast<GJBaseGameLayer*>(pl) == this) fireDue(this, "input queue");
+        GJBaseGameLayer::processQueuedButtons(dt, clearInputQueue);
     }
 };
 
